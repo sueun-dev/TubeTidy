@@ -31,6 +31,8 @@ class AppStateData {
     this.selectionChangeDay = 0,
     this.selectionChangesToday = 0,
     this.selectionChangePending = false,
+    this.dailySwapAddedId,
+    this.dailySwapRemovedId,
   });
 
   final User? user;
@@ -47,6 +49,8 @@ class AppStateData {
   final int selectionChangeDay;
   final int selectionChangesToday;
   final bool selectionChangePending;
+  final String? dailySwapAddedId;
+  final String? dailySwapRemovedId;
 
   factory AppStateData.initial() => const AppStateData();
 
@@ -97,6 +101,8 @@ class AppStateData {
     int? selectionChangeDay,
     int? selectionChangesToday,
     bool? selectionChangePending,
+    String? dailySwapAddedId,
+    String? dailySwapRemovedId,
   }) {
     return AppStateData(
       user: user ?? this.user,
@@ -113,6 +119,8 @@ class AppStateData {
       selectionChangeDay: selectionChangeDay ?? this.selectionChangeDay,
       selectionChangesToday: selectionChangesToday ?? this.selectionChangesToday,
       selectionChangePending: selectionChangePending ?? this.selectionChangePending,
+      dailySwapAddedId: dailySwapAddedId ?? this.dailySwapAddedId,
+      dailySwapRemovedId: dailySwapRemovedId ?? this.dailySwapRemovedId,
     );
   }
 }
@@ -232,10 +240,16 @@ class AppController extends StateNotifier<AppStateData> {
     }
     final selected = Set<String>.from(state.selectedChannelIds);
     if (selected.contains(channelId)) {
+      if (state.selectionCompleted && !_canRemoveChannel(channelId, selected)) {
+        _setToast('오늘은 채널 1개만 교체할 수 있습니다. 추가/제거를 더 진행할 수 없어요.');
+        return;
+      }
       selected.remove(channelId);
       state = state.copyWith(
         selectedChannelIds: Set.unmodifiable(selected),
         selectionChangePending: state.selectionCompleted ? true : state.selectionChangePending,
+        dailySwapRemovedId:
+            state.selectionCompleted ? (state.dailySwapRemovedId ?? channelId) : null,
       );
       return;
     }
@@ -245,10 +259,17 @@ class AppController extends StateNotifier<AppStateData> {
       return;
     }
 
+    if (state.selectionCompleted && !_canAddChannel(channelId)) {
+      _setToast('오늘은 채널 1개만 교체할 수 있습니다. 추가/제거를 더 진행할 수 없어요.');
+      return;
+    }
+
     selected.add(channelId);
     state = state.copyWith(
       selectedChannelIds: Set.unmodifiable(selected),
       selectionChangePending: state.selectionCompleted ? true : state.selectionChangePending,
+      dailySwapAddedId:
+          state.selectionCompleted ? (state.dailySwapAddedId ?? channelId) : null,
     );
   }
 
@@ -268,6 +289,8 @@ class AppController extends StateNotifier<AppStateData> {
       state = state.copyWith(
         selectionCompleted: true,
         selectionChangePending: false,
+        dailySwapAddedId: null,
+        dailySwapRemovedId: null,
       );
     } catch (error) {
       _setToast(kDebugMode ? '영상 로드 실패: $error' : '선택한 채널의 영상을 불러오지 못했습니다.');
@@ -355,12 +378,21 @@ class AppController extends StateNotifier<AppStateData> {
       final cache = await _selectionChangeCache;
       final data = await cache.read(userId);
       if (data == null) {
-        state = state.copyWith(selectionChangeDay: 0, selectionChangesToday: 0);
+        state = state.copyWith(
+          selectionChangeDay: 0,
+          selectionChangesToday: 0,
+          dailySwapAddedId: null,
+          dailySwapRemovedId: null,
+          selectionChangePending: false,
+        );
         return;
       }
       state = state.copyWith(
         selectionChangeDay: data.dayKey,
         selectionChangesToday: data.changesToday,
+        dailySwapAddedId: null,
+        dailySwapRemovedId: null,
+        selectionChangePending: false,
       );
     } catch (_) {
       // Ignore cache read failures.
@@ -382,6 +414,25 @@ class AppController extends StateNotifier<AppStateData> {
     return _canChangeSelectionToday();
   }
 
+  bool _canAddChannel(String channelId) {
+    if (!state.selectionCompleted) return true;
+    if (!state.selectionChangePending) return true;
+    final added = state.dailySwapAddedId;
+    return added == null || added == channelId;
+  }
+
+  bool _canRemoveChannel(String channelId, Set<String> selected) {
+    if (!state.selectionCompleted) return true;
+    if (!state.selectionChangePending) {
+      return selected.length > 1;
+    }
+    final removed = state.dailySwapRemovedId;
+    if (removed == null || removed == channelId) {
+      return true;
+    }
+    return false;
+  }
+
   void _recordSelectionChange() {
     final todayKey = _dayKey(DateTime.now());
     final count =
@@ -391,7 +442,13 @@ class AppController extends StateNotifier<AppStateData> {
   }
 
   void _resetSelectionChange(int todayKey) {
-    state = state.copyWith(selectionChangeDay: todayKey, selectionChangesToday: 0);
+    state = state.copyWith(
+      selectionChangeDay: todayKey,
+      selectionChangesToday: 0,
+      dailySwapAddedId: null,
+      dailySwapRemovedId: null,
+      selectionChangePending: false,
+    );
     _persistSelectionChange(todayKey, 0);
   }
 
