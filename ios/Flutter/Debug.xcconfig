@@ -1,0 +1,3 @@
+#include "Generated.xcconfig"
+GOOGLE_IOS_CLIENT_ID=594746397559-68g6fq0afigchg2ujn1ki35eorbcdu.apps.googleusercontent.com
+GOOGLE_REVERSED_CLIENT_ID=com.googleusercontent.apps.594746397559-68g6fq0afigchg2ujn1ki35eorbcdu
