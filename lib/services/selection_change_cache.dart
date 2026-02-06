@@ -30,11 +30,16 @@ class SelectionChangeCache {
     );
   }
 
+  Future<void> clear(String userId) async {
+    await _prefs.remove(_key(userId));
+  }
+
   String _key(String userId) => 'selection_change_v$cacheVersion:$userId';
 }
 
 class SelectionChangeState {
-  const SelectionChangeState({required this.dayKey, required this.changesToday});
+  const SelectionChangeState(
+      {required this.dayKey, required this.changesToday});
 
   final int dayKey;
   final int changesToday;

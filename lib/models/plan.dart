@@ -16,13 +16,13 @@ class Plan {
       case PlanTier.free:
         return 'Free';
       case PlanTier.starter:
-        return 'Starter';
+        return 'Plus';
       case PlanTier.growth:
-        return 'Growth';
+        return 'Pro';
       case PlanTier.unlimited:
         return 'Unlimited';
       case PlanTier.lifetime:
-        return 'Lifetime';
+        return 'Unlimited';
     }
   }
 

@@ -2,27 +2,28 @@ import 'dart:convert';
 
 import 'package:http/http.dart' as http;
 
-import '../config.dart';
 import '../models/transcript.dart';
+import 'backend_api.dart';
 
 class TranscriptService {
+  static const Duration _timeout = Duration(seconds: 30);
+
   static Future<TranscriptResult?> fetchTranscript(String videoId) async {
-    final baseUrl = AppConfig.transcriptApiUrl.isNotEmpty
-        ? AppConfig.transcriptApiUrl
-        : 'http://127.0.0.1:5055';
-    final uri = Uri.parse('$baseUrl/transcript');
+    final uri = BackendApi.uri('/transcript');
 
     try {
-      final response = await http.post(
-        uri,
-        headers: {'Content-Type': 'application/json'},
-        body: jsonEncode({
-          'video_id': videoId,
-          'max_chars': 1200,
-          'summarize': true,
-          'summary_lines': 3,
-        }),
-      );
+      final response = await http
+          .post(
+            uri,
+            headers: BackendApi.headers(),
+            body: jsonEncode({
+              'video_id': videoId,
+              'max_chars': 1200,
+              'summarize': true,
+              'summary_lines': 3,
+            }),
+          )
+          .timeout(_timeout);
 
       if (response.statusCode != 200) {
         final message = _parseErrorMessage(response.body);
@@ -64,6 +65,10 @@ class TranscriptService {
       final data = jsonDecode(body) as Map<String, dynamic>;
       final detail = data['detail'];
       if (detail is String) {
+        final lowered = detail.toLowerCase();
+        if (lowered.contains('member') || lowered.contains('membership')) {
+          return 'You might not have membership for this video.';
+        }
         return detail;
       }
     } catch (_) {}

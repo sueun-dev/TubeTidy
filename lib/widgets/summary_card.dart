@@ -1,10 +1,11 @@
 import 'package:flutter/cupertino.dart';
-import 'package:intl/intl.dart';
 
 import '../models/channel.dart';
 import '../models/transcript.dart';
 import '../models/video.dart';
 import '../theme.dart';
+import 'glass_surface.dart';
+import '../localization/app_strings.dart';
 
 class SummaryCard extends StatelessWidget {
   const SummaryCard({
@@ -13,6 +14,9 @@ class SummaryCard extends StatelessWidget {
     required this.channel,
     required this.transcript,
     required this.isTranscriptLoading,
+    required this.isQueued,
+    required this.strings,
+    required this.onWatchVideo,
     required this.isArchived,
     required this.onToggleArchive,
     required this.onRequestSummary,
@@ -22,104 +26,119 @@ class SummaryCard extends StatelessWidget {
   final Channel channel;
   final TranscriptResult? transcript;
   final bool isTranscriptLoading;
+  final bool isQueued;
+  final AppStrings strings;
+  final VoidCallback onWatchVideo;
   final bool isArchived;
   final VoidCallback onToggleArchive;
   final VoidCallback onRequestSummary;
 
   @override
   Widget build(BuildContext context) {
-    final dateLabel = DateFormat('MM.dd · a h:mm').format(video.publishedAt);
+    final dateLabel = _formatTimestamp(video.publishedAt);
 
-    return Container(
-      decoration: BoxDecoration(
-        color: AppColors.card,
-        borderRadius: BorderRadius.circular(20),
-        border: Border.all(color: AppColors.divider),
-        boxShadow: AppShadows.card,
-      ),
+    return GlassSurface(
+      settings: LiquidGlassPresets.panel,
+      borderRadius: BorderRadius.circular(LiquidRadius.xl),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
+          // Header section
           Padding(
-            padding: const EdgeInsets.fromLTRB(16, 16, 16, 12),
+            padding: const EdgeInsets.fromLTRB(18, 18, 18, 14),
             child: Row(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                ClipRRect(
-                  borderRadius: BorderRadius.circular(12),
-                  child: Image.network(
-                    video.thumbnailUrl,
-                    width: 56,
-                    height: 56,
-                    fit: BoxFit.cover,
-                    errorBuilder: (_, __, ___) => Container(
-                      width: 56,
-                      height: 56,
-                      color: AppColors.elevatedCard,
-                      alignment: Alignment.center,
-                      child: const Icon(CupertinoIcons.photo, color: AppColors.textSecondary),
-                    ),
-                  ),
+                _Thumbnail(
+                  thumbUrl: video.thumbnailUrl,
+                  videoId: video.youtubeId,
                 ),
-                const SizedBox(width: 12),
+                const SizedBox(width: 14),
                 Expanded(
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
                       Text(
                         video.title,
-                        style: const TextStyle(
-                          fontSize: 16,
-                          fontWeight: FontWeight.w600,
-                          height: 1.3,
-                          color: AppColors.textPrimary,
+                        style: LiquidTextStyles.headline.copyWith(
+                          height: 1.35,
                         ),
                         maxLines: 2,
                         overflow: TextOverflow.ellipsis,
                       ),
-                      const SizedBox(height: 6),
-                      Text(
-                        '${channel.title} · $dateLabel',
-                        style: const TextStyle(
-                          fontSize: 12,
-                          color: AppColors.textSecondary,
-                        ),
+                      const SizedBox(height: 8),
+                      Row(
+                        children: [
+                          Expanded(
+                            child: Text(
+                              '${channel.title} · $dateLabel',
+                              style: LiquidTextStyles.caption1,
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                            ),
+                          ),
+                        ],
                       ),
                     ],
                   ),
                 ),
-                Semantics(
-                  label: isArchived ? '별표 저장 해제' : '별표로 저장',
-                  button: true,
-                  child: CupertinoButton(
-                    padding: EdgeInsets.zero,
-                    onPressed: onToggleArchive,
-                    child: Icon(
-                      isArchived ? CupertinoIcons.star_fill : CupertinoIcons.star,
-                      color: isArchived ? AppColors.accent : AppColors.textSecondary,
-                    ),
-                  ),
+                const SizedBox(width: 8),
+                _ArchiveButton(
+                  isArchived: isArchived,
+                  onTap: onToggleArchive,
                 ),
               ],
             ),
           ),
+
+          // Meta chips
+          if (transcript != null && transcript!.source != 'error')
+            Padding(
+              padding: const EdgeInsets.fromLTRB(18, 0, 18, 12),
+              child: _TranscriptMeta(transcript: transcript, strings: strings),
+            ),
+
+          // Transcript body
           Padding(
-            padding: const EdgeInsets.fromLTRB(16, 0, 16, 12),
-            child: _TranscriptMeta(transcript: transcript),
-          ),
-          Padding(
-            padding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
-            child: Container(
-              padding: const EdgeInsets.all(12),
-              decoration: BoxDecoration(
-                color: AppColors.elevatedCard,
-                borderRadius: BorderRadius.circular(14),
-                border: Border.all(color: AppColors.hairline),
-              ),
+            padding: const EdgeInsets.fromLTRB(18, 0, 18, 16),
+            child: GlassSurfaceThin(
+              padding: const EdgeInsets.all(14),
+              borderRadius: BorderRadius.circular(LiquidRadius.md),
               child: _TranscriptBody(
                 transcript: transcript,
                 isLoading: isTranscriptLoading,
+                isQueued: isQueued,
+                strings: strings,
                 onRequestSummary: onRequestSummary,
+              ),
+            ),
+          ),
+
+          // Watch button
+          Padding(
+            padding: const EdgeInsets.fromLTRB(18, 0, 18, 18),
+            child: SizedBox(
+              width: double.infinity,
+              child: LiquidGlassButton(
+                onPressed: onWatchVideo,
+                child: Row(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    const Icon(
+                      CupertinoIcons.play_fill,
+                      size: 14,
+                      color: LiquidColors.brand,
+                    ),
+                    const SizedBox(width: 8),
+                    Text(
+                      strings.watchVideo,
+                      style: LiquidTextStyles.footnote.copyWith(
+                        fontWeight: FontWeight.w600,
+                        color: LiquidColors.brand,
+                      ),
+                    ),
+                  ],
+                ),
               ),
             ),
           ),
@@ -127,12 +146,108 @@ class SummaryCard extends StatelessWidget {
       ),
     );
   }
+
+  String _formatTimestamp(DateTime date) {
+    final month = date.month.toString().padLeft(2, '0');
+    final day = date.day.toString().padLeft(2, '0');
+    final minute = date.minute.toString().padLeft(2, '0');
+    final isAm = date.hour < 12;
+    final hour12 = date.hour % 12 == 0 ? 12 : date.hour % 12;
+    final period = strings.isEn ? (isAm ? 'AM' : 'PM') : (isAm ? '오전' : '오후');
+    return '$month.$day · $period $hour12:$minute';
+  }
+}
+
+class _ArchiveButton extends StatelessWidget {
+  const _ArchiveButton({
+    required this.isArchived,
+    required this.onTap,
+  });
+
+  final bool isArchived;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    return GestureDetector(
+      onTap: onTap,
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 200),
+        padding: const EdgeInsets.all(8),
+        decoration: BoxDecoration(
+          color: isArchived
+              ? LiquidColors.accent.withValues(alpha: 0.15)
+              : LiquidColors.glassDark,
+          borderRadius: BorderRadius.circular(LiquidRadius.sm),
+        ),
+        child: Icon(
+          isArchived ? CupertinoIcons.star_fill : CupertinoIcons.star,
+          size: 20,
+          color: isArchived ? LiquidColors.accent : LiquidColors.textTertiary,
+        ),
+      ),
+    );
+  }
+}
+
+class _Thumbnail extends StatelessWidget {
+  const _Thumbnail({required this.thumbUrl, required this.videoId});
+
+  final String thumbUrl;
+  final String videoId;
+
+  String get resolvedUrl {
+    if (thumbUrl.isNotEmpty) return thumbUrl;
+    if (videoId.isNotEmpty) {
+      return 'https://i.ytimg.com/vi/$videoId/hqdefault.jpg';
+    }
+    return '';
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final url = resolvedUrl;
+    final placeholder = Container(
+      width: 64,
+      height: 64,
+      decoration: BoxDecoration(
+        color: LiquidColors.glassDark,
+        borderRadius: BorderRadius.circular(LiquidRadius.md),
+      ),
+      alignment: Alignment.center,
+      child: const Icon(
+        CupertinoIcons.photo,
+        color: LiquidColors.textTertiary,
+        size: 24,
+      ),
+    );
+
+    if (url.isEmpty) {
+      return placeholder;
+    }
+
+    return ClipRRect(
+      borderRadius: BorderRadius.circular(LiquidRadius.md),
+      child: Image.network(
+        url,
+        width: 64,
+        height: 64,
+        fit: BoxFit.cover,
+        errorBuilder: (_, __, ___) => placeholder,
+        loadingBuilder: (context, child, progress) {
+          if (progress == null) return child;
+          return placeholder;
+        },
+      ),
+    );
+  }
 }
 
 class _TranscriptMeta extends StatelessWidget {
-  const _TranscriptMeta({required this.transcript});
+  const _TranscriptMeta({required this.transcript, required this.strings});
 
   final TranscriptResult? transcript;
+  final AppStrings strings;
 
   @override
   Widget build(BuildContext context) {
@@ -142,13 +257,21 @@ class _TranscriptMeta extends StatelessWidget {
 
     final chips = <Widget>[];
     if ((transcript!.summary ?? '').trim().isNotEmpty) {
-      chips.add(const _MetaChip(label: '3줄 요약'));
+      chips.add(GlassMetaChip(
+        label: strings.metaSummary,
+        color: LiquidColors.success,
+      ));
     }
-    final sourceLabel = transcript!.source == 'whisper' ? '음성 인식' : '자막';
-    chips.add(_MetaChip(label: sourceLabel));
+    final sourceLabel = transcript!.source == 'whisper'
+        ? strings.metaSpeech
+        : strings.metaCaptions;
+    chips.add(GlassMetaChip(label: sourceLabel));
 
     if (transcript!.partial) {
-      chips.add(const _MetaChip(label: '자막 일부'));
+      chips.add(GlassMetaChip(
+        label: strings.metaPartial,
+        color: LiquidColors.accent,
+      ));
     }
 
     return Wrap(
@@ -159,49 +282,46 @@ class _TranscriptMeta extends StatelessWidget {
   }
 }
 
-class _MetaChip extends StatelessWidget {
-  const _MetaChip({required this.label});
-
-  final String label;
-
-  @override
-  Widget build(BuildContext context) {
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-      decoration: BoxDecoration(
-        color: AppColors.card,
-        borderRadius: BorderRadius.circular(10),
-        border: Border.all(color: AppColors.divider),
-      ),
-      child: Text(
-        label,
-        style: const TextStyle(fontSize: 11, color: AppColors.textSecondary),
-      ),
-    );
-  }
-}
-
 class _TranscriptBody extends StatelessWidget {
   const _TranscriptBody({
     required this.transcript,
     required this.isLoading,
+    required this.isQueued,
+    required this.strings,
     required this.onRequestSummary,
   });
 
   final TranscriptResult? transcript;
   final bool isLoading;
+  final bool isQueued;
+  final AppStrings strings;
   final VoidCallback onRequestSummary;
 
   @override
   Widget build(BuildContext context) {
+    if (isQueued && !isLoading && transcript == null) {
+      return Row(
+        children: [
+          const CupertinoActivityIndicator(radius: 8),
+          const SizedBox(width: 10),
+          Text(
+            strings.queued,
+            style: LiquidTextStyles.caption1,
+          ),
+        ],
+      );
+    }
+
     if (isLoading && transcript == null) {
       return Row(
-        children: const [
-          CupertinoActivityIndicator(radius: 8),
-          SizedBox(width: 8),
-          Text(
-            '자막/음성 텍스트 생성 중',
-            style: TextStyle(fontSize: 12, color: AppColors.textSecondary),
+        children: [
+          const CupertinoActivityIndicator(radius: 8),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Text(
+              strings.generatingTranscript,
+              style: LiquidTextStyles.caption1,
+            ),
           ),
         ],
       );
@@ -211,14 +331,46 @@ class _TranscriptBody extends StatelessWidget {
       return Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Text(
-            transcript!.text,
-            style: const TextStyle(fontSize: 12, color: AppColors.danger),
+          Row(
+            children: [
+              const Icon(
+                CupertinoIcons.exclamationmark_circle,
+                size: 14,
+                color: LiquidColors.danger,
+              ),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Text(
+                  transcript!.text,
+                  style: LiquidTextStyles.caption1.copyWith(
+                    color: LiquidColors.danger,
+                  ),
+                ),
+              ),
+            ],
           ),
-          const SizedBox(height: 10),
-          _ActionButton(
-            label: '다시 요약하기',
+          const SizedBox(height: 12),
+          LiquidGlassButton(
+            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
             onPressed: onRequestSummary,
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                const Icon(
+                  CupertinoIcons.arrow_clockwise,
+                  size: 14,
+                  color: LiquidColors.brand,
+                ),
+                const SizedBox(width: 6),
+                Text(
+                  strings.retrySummarize,
+                  style: LiquidTextStyles.caption1.copyWith(
+                    fontWeight: FontWeight.w600,
+                    color: LiquidColors.brand,
+                  ),
+                ),
+              ],
+            ),
           ),
         ],
       );
@@ -228,14 +380,32 @@ class _TranscriptBody extends StatelessWidget {
       return Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          const Text(
-            '요약이 아직 생성되지 않았습니다.',
-            style: TextStyle(fontSize: 12, color: AppColors.textSecondary),
+          Text(
+            strings.notGenerated,
+            style: LiquidTextStyles.caption1,
           ),
-          const SizedBox(height: 10),
-          _ActionButton(
-            label: '요약하기',
+          const SizedBox(height: 12),
+          LiquidGlassButton(
+            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
             onPressed: onRequestSummary,
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                const Icon(
+                  CupertinoIcons.sparkles,
+                  size: 14,
+                  color: LiquidColors.brand,
+                ),
+                const SizedBox(width: 6),
+                Text(
+                  strings.summarize,
+                  style: LiquidTextStyles.caption1.copyWith(
+                    fontWeight: FontWeight.w600,
+                    color: LiquidColors.brand,
+                  ),
+                ),
+              ],
+            ),
           ),
         ],
       );
@@ -246,31 +416,8 @@ class _TranscriptBody extends StatelessWidget {
 
     return Text(
       displayText,
-      style: const TextStyle(fontSize: 13, height: 1.45, color: AppColors.textSecondary),
-    );
-  }
-}
-
-class _ActionButton extends StatelessWidget {
-  const _ActionButton({required this.label, required this.onPressed});
-
-  final String label;
-  final VoidCallback onPressed;
-
-  @override
-  Widget build(BuildContext context) {
-    return CupertinoButton(
-      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-      minSize: 32,
-      color: AppColors.brand,
-      onPressed: onPressed,
-      child: Text(
-        label,
-        style: const TextStyle(
-          fontSize: 12,
-          fontWeight: FontWeight.w600,
-          color: CupertinoColors.white,
-        ),
+      style: LiquidTextStyles.subheadline.copyWith(
+        height: 1.5,
       ),
     );
   }

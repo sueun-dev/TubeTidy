@@ -9,7 +9,7 @@ import 'screens/connect_youtube_screen.dart';
 import 'screens/main_tab_scaffold.dart';
 import 'screens/onboarding_screen.dart';
 import 'screens/plan_screen.dart';
-import 'state/app_state.dart';
+import 'state/app_controller.dart';
 
 final routerProvider = Provider<GoRouter>((ref) {
   final notifier = ref.watch(appControllerProvider.notifier);
@@ -50,14 +50,18 @@ final routerProvider = Provider<GoRouter>((ref) {
       }
 
       if (signedIn && !selected) {
-        if (location == '/channels' || location == '/plan' || location == '/connect') {
+        if (location == '/channels' ||
+            location == '/plan' ||
+            location == '/connect') {
           return null;
         }
         return '/channels';
       }
 
       if (signedIn && selected) {
-        if (location == '/app' || location == '/plan') {
+        if (location == '/app' ||
+            location == '/plan' ||
+            location == '/channels') {
           return null;
         }
         return '/app';

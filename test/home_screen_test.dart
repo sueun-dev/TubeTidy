@@ -8,7 +8,7 @@ import 'package:youtube_summary/models/transcript.dart';
 import 'package:youtube_summary/models/user.dart';
 import 'package:youtube_summary/models/video.dart';
 import 'package:youtube_summary/screens/home_screen.dart';
-import 'package:youtube_summary/state/app_state.dart';
+import 'package:youtube_summary/state/app_controller.dart';
 
 void main() {
   testWidgets('Home screen renders summary cards', (WidgetTester tester) async {
@@ -26,7 +26,7 @@ void main() {
       title: '테스트 채널',
       thumbnailUrl: 'https://example.com/channel.jpg',
     );
-    final transcript = TranscriptResult(
+    const transcript = TranscriptResult(
       text: '원문 텍스트',
       summary: '요약 1\n요약 2\n요약 3',
       source: 'whisper',
@@ -44,14 +44,15 @@ void main() {
       channels: [channel],
       selectedChannelIds: const {'c1'},
       videos: [video],
-      transcripts: {'v1': transcript},
+      transcripts: const {'v1': transcript},
     );
 
     await tester.pumpWidget(
       ProviderScope(
         overrides: [
           appControllerProvider.overrideWith(
-            (ref) => AppController(ref, initialState: state, restoreSession: false),
+            (ref) =>
+                AppController(ref, initialState: state, restoreSession: false),
           ),
         ],
         child: const CupertinoApp(home: HomeScreen()),
