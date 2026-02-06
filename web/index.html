@@ -33,6 +33,16 @@
   <link rel="manifest" href="manifest.json">
 </head>
 <body>
+  <script>
+    (function () {
+      if (location.hostname === '127.0.0.1' &&
+          location.search.indexOf('noredirect=1') === -1) {
+        var target = new URL(location.href);
+        target.hostname = 'localhost';
+        location.replace(target.toString());
+      }
+    })();
+  </script>
   <script src="flutter_bootstrap.js" async></script>
 </body>
 </html>

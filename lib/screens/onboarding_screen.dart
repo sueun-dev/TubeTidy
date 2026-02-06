@@ -1,43 +1,26 @@
 import 'package:flutter/cupertino.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
-import '../state/app_state.dart';
+import '../localization/app_strings.dart';
+import '../state/app_controller.dart';
 import '../theme.dart';
+import '../widgets/google_sign_in_button.dart';
+import '../widgets/glass_surface.dart';
 
 class OnboardingScreen extends ConsumerWidget {
   const OnboardingScreen({super.key});
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    ref.listen<String?>(
-      appControllerProvider.select((state) => state.toastMessage),
-      (previous, next) {
-        if (next == null || next.isEmpty) return;
-        showCupertinoDialog<void>(
-          context: context,
-          builder: (dialogContext) => CupertinoAlertDialog(
-            title: const Text('로그인 오류'),
-            content: Text(next),
-            actions: [
-              CupertinoDialogAction(
-                onPressed: () {
-                  Navigator.of(dialogContext).pop();
-                  ref.read(appControllerProvider.notifier).clearToast();
-                },
-                child: const Text('확인'),
-              ),
-            ],
-          ),
-        );
-      },
-    );
-
     final appState = ref.watch(appControllerProvider);
     final controller = ref.read(appControllerProvider.notifier);
+    final strings = ref.watch(appStringsProvider);
 
     return CupertinoPageScaffold(
       child: DecoratedBox(
-        decoration: const BoxDecoration(gradient: AppGradients.hero),
+        decoration:
+            const BoxDecoration(gradient: LiquidGradients.vibrantCanvas),
         child: SafeArea(
           child: Stack(
             children: [
@@ -49,22 +32,18 @@ class OnboardingScreen extends ConsumerWidget {
                       padding: const EdgeInsets.fromLTRB(24, 32, 24, 12),
                       child: Column(
                         crossAxisAlignment: CrossAxisAlignment.start,
-                        children: const [
+                        children: [
                           Text(
-                            'YouTube\n3줄 요약',
-                            style: TextStyle(
+                            strings.appTitle,
+                            style: LiquidTextStyles.largeTitle.copyWith(
                               fontSize: 36,
-                              fontWeight: FontWeight.w700,
-                              letterSpacing: -0.8,
-                              color: AppColors.textPrimary,
                             ),
                           ),
-                          SizedBox(height: 12),
+                          const SizedBox(height: 12),
                           Text(
-                            '구독 채널의 최신 업로드를\n3줄 요약으로 바로 확인하세요.',
-                            style: TextStyle(
+                            strings.appSubtitle,
+                            style: LiquidTextStyles.subheadline.copyWith(
                               fontSize: 16,
-                              color: AppColors.textSecondary,
                               height: 1.5,
                             ),
                           ),
@@ -75,32 +54,26 @@ class OnboardingScreen extends ConsumerWidget {
                   SliverToBoxAdapter(
                     child: Padding(
                       padding: const EdgeInsets.symmetric(horizontal: 16),
-                      child: Container(
+                      child: GlassSurface(
                         padding: const EdgeInsets.all(16),
-                        decoration: BoxDecoration(
-                          color: AppColors.card,
-                          borderRadius: BorderRadius.circular(20),
-                          border: Border.all(color: AppColors.divider),
-                          boxShadow: AppShadows.card,
-                        ),
-                        child: const Column(
+                        child: Column(
                           children: [
                             _FeatureRow(
                               icon: CupertinoIcons.play_rectangle_fill,
-                              title: '구독 채널 자동 동기화',
-                              subtitle: '로그인 후 연결 즉시 최신 채널을 불러옵니다.',
+                              title: strings.featureSyncTitle,
+                              subtitle: strings.featureSyncSubtitle,
                             ),
-                            SizedBox(height: 12),
+                            const SizedBox(height: 12),
                             _FeatureRow(
                               icon: CupertinoIcons.text_alignleft,
-                              title: '핵심만 3줄 요약',
-                              subtitle: '긴 영상도 핵심만 빠르게 읽어보세요.',
+                              title: strings.featureSummaryTitle,
+                              subtitle: strings.featureSummarySubtitle,
                             ),
-                            SizedBox(height: 12),
+                            const SizedBox(height: 12),
                             _FeatureRow(
                               icon: CupertinoIcons.calendar,
-                              title: '아카이빙 캘린더',
-                              subtitle: '저장한 요약을 날짜별로 모아볼 수 있어요.',
+                              title: strings.featureArchiveTitle,
+                              subtitle: strings.featureArchiveSubtitle,
                             ),
                           ],
                         ),
@@ -116,17 +89,24 @@ class OnboardingScreen extends ConsumerWidget {
                         children: [
                           SizedBox(
                             width: double.infinity,
-                            child: CupertinoButton.filled(
-                              onPressed: appState.isLoading ? null : controller.signInWithGoogle,
-                              child: appState.isLoading
-                                  ? const CupertinoActivityIndicator(color: CupertinoColors.white)
-                                  : const Text('Google로 로그인'),
-                            ),
+                            child: kIsWeb
+                                ? GoogleSignInButton(
+                                    disabled: appState.isLoading,
+                                  )
+                                : CupertinoButton.filled(
+                                    onPressed: appState.isLoading
+                                        ? null
+                                        : controller.signInWithGoogle,
+                                    child: appState.isLoading
+                                        ? const CupertinoActivityIndicator(
+                                            color: CupertinoColors.white)
+                                        : Text(strings.signInWithGoogle),
+                                  ),
                           ),
                           const SizedBox(height: 10),
-                          const Text(
-                            '로그인하면 YouTube 계정이 자동으로 연동됩니다.',
-                            style: TextStyle(fontSize: 12, color: AppColors.textSecondary),
+                          Text(
+                            strings.loginHelper,
+                            style: LiquidTextStyles.caption1,
                             textAlign: TextAlign.center,
                           ),
                         ],
@@ -159,7 +139,7 @@ class _BackdropOrbs extends StatelessWidget {
                 width: 180,
                 height: 180,
                 decoration: BoxDecoration(
-                  color: AppColors.accent.withAlpha(31),
+                  color: LiquidColors.accent.withValues(alpha: 0.12),
                   shape: BoxShape.circle,
                 ),
               ),
@@ -171,7 +151,7 @@ class _BackdropOrbs extends StatelessWidget {
                 width: 200,
                 height: 200,
                 decoration: BoxDecoration(
-                  color: AppColors.brand.withAlpha(20),
+                  color: LiquidColors.brand.withValues(alpha: 0.08),
                   shape: BoxShape.circle,
                 ),
               ),
@@ -203,10 +183,10 @@ class _FeatureRow extends StatelessWidget {
           width: 36,
           height: 36,
           decoration: BoxDecoration(
-            color: AppColors.accentSoft,
-            borderRadius: BorderRadius.circular(12),
+            color: LiquidColors.accentSoft,
+            borderRadius: BorderRadius.circular(LiquidRadius.sm),
           ),
-          child: Icon(icon, color: AppColors.brand, size: 18),
+          child: Icon(icon, color: LiquidColors.brand, size: 18),
         ),
         const SizedBox(width: 12),
         Expanded(
@@ -215,15 +195,14 @@ class _FeatureRow extends StatelessWidget {
             children: [
               Text(
                 title,
-                style: const TextStyle(
+                style: LiquidTextStyles.subheadline.copyWith(
                   fontWeight: FontWeight.w600,
-                  color: AppColors.textPrimary,
                 ),
               ),
               const SizedBox(height: 4),
               Text(
                 subtitle,
-                style: const TextStyle(fontSize: 12, color: AppColors.textSecondary),
+                style: LiquidTextStyles.caption1,
               ),
             ],
           ),

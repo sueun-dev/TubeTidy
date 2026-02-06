@@ -1,12 +1,17 @@
+import 'dart:async';
+
 import 'package:flutter/cupertino.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
-import 'package:intl/intl.dart';
+import 'package:url_launcher/url_launcher.dart';
 
+import '../localization/app_strings.dart';
 import '../models/channel.dart';
-import '../state/app_state.dart';
-import '../state/ui_state.dart';
+import '../state/app_controller.dart';
+import '../state/ui_providers.dart';
 import '../theme.dart';
+import '../widgets/glass_surface.dart';
 import '../widgets/summary_card.dart';
 
 class HomeScreen extends ConsumerWidget {
@@ -17,103 +22,154 @@ class HomeScreen extends ConsumerWidget {
     final appState = ref.watch(appControllerProvider);
     final selectedIds = appState.selectedChannelIds;
     final filterChannelId = ref.watch(homeFilterProvider);
+    final strings = ref.watch(appStringsProvider);
+    final controller = ref.read(appControllerProvider.notifier);
+    final channelById = {
+      for (final channel in appState.channels) channel.id: channel,
+    };
 
-    if (filterChannelId != allChannelsFilter && !selectedIds.contains(filterChannelId)) {
+    if (filterChannelId != allChannelsFilter &&
+        !selectedIds.contains(filterChannelId)) {
       WidgetsBinding.instance.addPostFrameCallback((_) {
         ref.read(homeFilterProvider.notifier).state = allChannelsFilter;
       });
     }
 
     final visibleVideos = appState.videos
-        .where((video) => filterChannelId == allChannelsFilter || video.channelId == filterChannelId)
+        .where((video) =>
+            filterChannelId == allChannelsFilter ||
+            video.channelId == filterChannelId)
         .toList();
+    final archivedIds = {for (final e in appState.archives) e.videoId};
 
     return CupertinoPageScaffold(
-      child: SafeArea(
-        top: false,
-        child: CustomScrollView(
-          slivers: [
-            const CupertinoSliverNavigationBar(
-              largeTitle: Text('요약 홈'),
-            ),
-            SliverToBoxAdapter(
-              child: Padding(
-                padding: const EdgeInsets.fromLTRB(16, 6, 16, 12),
-                child: _OverviewCard(
-                  planName: appState.plan.displayName,
-                  planPrice: appState.plan.priceLabel,
-                  selectedChannels: appState.selectedCount,
-                  totalSummaries: visibleVideos.length,
-                  savedCount: appState.archives.length,
-                  channelLimitLabel: '${appState.channelLimit} 채널',
-                ),
+      child: DecoratedBox(
+        decoration: const BoxDecoration(gradient: LiquidGradients.canvas),
+        child: SafeArea(
+          top: false,
+          child: CustomScrollView(
+            slivers: [
+              CupertinoSliverNavigationBar(
+                largeTitle: Text(strings.homeTitle),
+                backgroundColor: const Color(0x00000000),
+                border: null,
               ),
-            ),
-            if (appState.selectionCompleted && appState.isSelectionCooldownActive)
+              CupertinoSliverRefreshControl(
+                onRefresh: controller.refreshHome,
+              ),
               SliverToBoxAdapter(
                 child: Padding(
-                  padding: const EdgeInsets.fromLTRB(16, 0, 16, 12),
-                  child: _CooldownBanner(nextChangeAt: appState.nextSelectionChangeAt),
-                ),
-              ),
-            SliverToBoxAdapter(
-              child: Padding(
-                padding: const EdgeInsets.fromLTRB(16, 0, 16, 12),
-                child: _ChannelFilter(
-                  channels: appState.channels
-                      .where((channel) => selectedIds.contains(channel.id))
-                      .toList(),
-                  selectedChannelId: filterChannelId,
-                  onChanged: (value) => ref.read(homeFilterProvider.notifier).state = value,
-                  onEdit: () => context.push('/channels'),
-                ),
-              ),
-            ),
-            if (visibleVideos.isEmpty)
-              const SliverFillRemaining(
-                hasScrollBody: false,
-                child: _EmptyState(),
-              )
-            else
-              SliverPadding(
-                padding: const EdgeInsets.fromLTRB(16, 0, 16, 24),
-                sliver: SliverList(
-                  delegate: SliverChildBuilderDelegate(
-                    (context, index) {
-                      final video = visibleVideos[index];
-                      final transcript = appState.transcripts[video.id];
-                      final isTranscriptLoading = appState.transcriptLoading.contains(video.id);
-                      final channel = appState.channels.firstWhere(
-                        (c) => c.id == video.channelId,
-                        orElse: () => Channel(
-                          id: video.channelId,
-                          youtubeChannelId: '',
-                          title: '알 수 없음',
-                          thumbnailUrl: '',
-                        ),
-                      );
-
-                      return Padding(
-                        key: ValueKey('summary-${video.id}'),
-                        padding: const EdgeInsets.only(bottom: 18),
-                        child: SummaryCard(
-                          video: video,
-                          channel: channel,
-                          transcript: transcript,
-                          isTranscriptLoading: isTranscriptLoading,
-                          isArchived: appState.archives.any((entry) => entry.videoId == video.id),
-                          onToggleArchive: () =>
-                              ref.read(appControllerProvider.notifier).toggleArchive(video.id),
-                          onRequestSummary: () =>
-                              ref.read(appControllerProvider.notifier).requestSummaryFor(video),
-                        ),
-                      );
-                    },
-                    childCount: visibleVideos.length,
+                  padding: const EdgeInsets.fromLTRB(16, 6, 16, 14),
+                  child: _OverviewCard(
+                    strings: strings,
+                    planName: strings.planName(appState.plan.tier),
+                    planPrice: strings.planPriceLabel(appState.plan.tier),
+                    selectedChannels: appState.selectedCount,
+                    totalSummaries: visibleVideos.length,
+                    savedCount: appState.archives.length,
+                    channelLimitLabel:
+                        strings.channelCountLabel(appState.channelLimit),
                   ),
                 ),
               ),
-          ],
+              if (appState.selectionCompleted &&
+                  appState.isSelectionCooldownActive)
+                SliverToBoxAdapter(
+                  child: Padding(
+                    padding: const EdgeInsets.fromLTRB(16, 0, 16, 14),
+                    child: _CooldownBanner(
+                      strings: strings,
+                      nextChangeAt: appState.nextSelectionChangeAt,
+                    ),
+                  ),
+                ),
+              SliverToBoxAdapter(
+                child: Padding(
+                  padding: const EdgeInsets.fromLTRB(16, 0, 16, 14),
+                  child: _ChannelFilter(
+                    strings: strings,
+                    channels: appState.channels
+                        .where((channel) => selectedIds.contains(channel.id))
+                        .toList(),
+                    selectedChannelId: filterChannelId,
+                    onChanged: (value) =>
+                        ref.read(homeFilterProvider.notifier).state = value,
+                  ),
+                ),
+              ),
+              if (visibleVideos.isEmpty)
+                SliverFillRemaining(
+                  hasScrollBody: false,
+                  child: _EmptyState(
+                    label: strings.emptySummaries,
+                    isLoading: appState.isLoading,
+                    primaryActionLabel: strings.reload,
+                    onPrimaryAction: controller.refreshHome,
+                    secondaryActionLabel: strings.manageChannels,
+                    onSecondaryAction: () => context.push('/channels'),
+                  ),
+                )
+              else
+                SliverPadding(
+                  padding: const EdgeInsets.fromLTRB(16, 0, 16, 24),
+                  sliver: SliverList(
+                    delegate: SliverChildBuilderDelegate(
+                      (context, index) {
+                        final video = visibleVideos[index];
+                        final transcript = appState.transcripts[video.id];
+                        final isTranscriptLoading =
+                            appState.transcriptLoading.contains(video.id);
+                        final isQueued =
+                            appState.transcriptQueued.contains(video.id);
+                        final channel = channelById[video.channelId] ??
+                            Channel(
+                              id: video.channelId,
+                              youtubeChannelId: '',
+                              title: strings.unknownChannel,
+                              thumbnailUrl: '',
+                            );
+
+                        return Padding(
+                          key: ValueKey('summary-${video.id}'),
+                          padding: const EdgeInsets.only(bottom: 18),
+                          child: SummaryCard(
+                            video: video,
+                            channel: channel,
+                            transcript: transcript,
+                            isTranscriptLoading: isTranscriptLoading,
+                            isQueued: isQueued,
+                            strings: strings,
+                            onWatchVideo: () {
+                              unawaited(() async {
+                                ref
+                                    .read(appControllerProvider.notifier)
+                                    .recordVideoInteraction(video.youtubeId);
+                                final uri = Uri.parse(
+                                    'https://www.youtube.com/watch?v=${video.youtubeId}');
+                                await launchUrl(
+                                  uri,
+                                  mode: kIsWeb
+                                      ? LaunchMode.platformDefault
+                                      : LaunchMode.externalApplication,
+                                );
+                              }());
+                            },
+                            isArchived: archivedIds.contains(video.id),
+                            onToggleArchive: () => ref
+                                .read(appControllerProvider.notifier)
+                                .toggleArchive(video.id),
+                            onRequestSummary: () => ref
+                                .read(appControllerProvider.notifier)
+                                .requestSummaryFor(video),
+                          ),
+                        );
+                      },
+                      childCount: visibleVideos.length,
+                    ),
+                  ),
+                ),
+            ],
+          ),
         ),
       ),
     );
@@ -122,6 +178,7 @@ class HomeScreen extends ConsumerWidget {
 
 class _OverviewCard extends StatelessWidget {
   const _OverviewCard({
+    required this.strings,
     required this.planName,
     required this.planPrice,
     required this.selectedChannels,
@@ -130,6 +187,7 @@ class _OverviewCard extends StatelessWidget {
     required this.channelLimitLabel,
   });
 
+  final AppStrings strings;
   final String planName;
   final String planPrice;
   final int selectedChannels;
@@ -139,55 +197,46 @@ class _OverviewCard extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return Container(
-      padding: const EdgeInsets.all(16),
-      decoration: BoxDecoration(
-        gradient: AppGradients.card,
-        borderRadius: BorderRadius.circular(20),
-        border: Border.all(color: AppColors.hairline),
-      ),
+    return GlassSurface(
+      settings: LiquidGlassPresets.panel,
+      padding: const EdgeInsets.all(18),
+      borderRadius: BorderRadius.circular(LiquidRadius.xl),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           Row(
             children: [
-              Container(
-                padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
-                decoration: BoxDecoration(
-                  color: AppColors.accentSoft,
-                  borderRadius: BorderRadius.circular(12),
-                ),
-                child: Text(
-                  '$planName 플랜 · $planPrice',
-                  style: const TextStyle(
-                    fontSize: 12,
-                    fontWeight: FontWeight.w600,
-                    color: AppColors.brandDark,
-                  ),
-                ),
+              GlassMetaChip(
+                label: '$planName  $planPrice',
+                color: LiquidColors.brand,
               ),
               const Spacer(),
               Text(
-                '선택 채널 $selectedChannels / $channelLimitLabel',
-                style: const TextStyle(fontSize: 12, color: AppColors.textSecondary),
+                strings.selectedChannelsLabel(
+                    selectedChannels, channelLimitLabel),
+                style: LiquidTextStyles.caption1,
               ),
             ],
           ),
-          const SizedBox(height: 12),
-          const Text(
-            '오늘의 기술/트렌드 요약',
-            style: TextStyle(
-              fontSize: 18,
-              fontWeight: FontWeight.w700,
-              color: AppColors.textPrimary,
-            ),
+          const SizedBox(height: 14),
+          Text(
+            strings.todaySummary,
+            style: LiquidTextStyles.title3,
           ),
-          const SizedBox(height: 8),
+          const SizedBox(height: 12),
           Row(
             children: [
-              _StatPill(label: '요약', value: totalSummaries),
-              const SizedBox(width: 8),
-              _StatPill(label: '별표', value: savedCount),
+              _StatPill(
+                icon: CupertinoIcons.doc_text,
+                label: strings.summaryLabel,
+                value: totalSummaries,
+              ),
+              const SizedBox(width: 10),
+              _StatPill(
+                icon: CupertinoIcons.star,
+                label: strings.savedLabel,
+                value: savedCount,
+              ),
             ],
           ),
         ],
@@ -197,30 +246,34 @@ class _OverviewCard extends StatelessWidget {
 }
 
 class _StatPill extends StatelessWidget {
-  const _StatPill({required this.label, required this.value});
+  const _StatPill({
+    required this.icon,
+    required this.label,
+    required this.value,
+  });
 
+  final IconData icon;
   final String label;
   final int value;
 
   @override
   Widget build(BuildContext context) {
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
-      decoration: BoxDecoration(
-        color: AppColors.card,
-        borderRadius: BorderRadius.circular(12),
-        border: Border.all(color: AppColors.divider),
-      ),
+    return GlassSurfaceSoft(
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+      borderRadius: BorderRadius.circular(LiquidRadius.sm),
       child: Row(
+        mainAxisSize: MainAxisSize.min,
         children: [
-          Text(
-            label,
-            style: const TextStyle(fontSize: 12, color: AppColors.textSecondary),
-          ),
+          Icon(icon, size: 14, color: LiquidColors.textSecondary),
+          const SizedBox(width: 6),
+          Text(label, style: LiquidTextStyles.caption1),
           const SizedBox(width: 6),
           Text(
             value.toString(),
-            style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w600),
+            style: LiquidTextStyles.footnote.copyWith(
+              fontWeight: FontWeight.w600,
+              color: LiquidColors.textPrimary,
+            ),
           ),
         ],
       ),
@@ -230,58 +283,38 @@ class _StatPill extends StatelessWidget {
 
 class _ChannelFilter extends StatelessWidget {
   const _ChannelFilter({
+    required this.strings,
     required this.channels,
     required this.selectedChannelId,
     required this.onChanged,
-    required this.onEdit,
   });
 
+  final AppStrings strings;
   final List<Channel> channels;
   final String selectedChannelId;
   final ValueChanged<String> onChanged;
-  final VoidCallback onEdit;
 
   @override
   Widget build(BuildContext context) {
-    return Container(
-      padding: const EdgeInsets.all(12),
-      decoration: BoxDecoration(
-        color: AppColors.card,
-        borderRadius: BorderRadius.circular(16),
-        border: Border.all(color: AppColors.divider),
-      ),
+    return GlassSurface(
+      settings: LiquidGlassPresets.soft,
+      padding: const EdgeInsets.all(14),
+      borderRadius: BorderRadius.circular(LiquidRadius.lg),
       child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
+        crossAxisAlignment: CrossAxisAlignment.center,
         children: [
-          Row(
-            children: [
-              const Text(
-                '채널 필터',
-                style: TextStyle(
-                  fontWeight: FontWeight.w600,
-                  color: AppColors.textPrimary,
-                ),
-              ),
-              const Spacer(),
-              CupertinoButton(
-                padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
-                minSize: 28,
-                color: AppColors.brand,
-                onPressed: onEdit,
-                child: const Text(
-                  '편집',
-                  style: TextStyle(fontSize: 11, color: CupertinoColors.white),
-                ),
-              ),
-            ],
+          Text(
+            strings.channelFilter,
+            style: LiquidTextStyles.headline,
           ),
-          const SizedBox(height: 8),
+          const SizedBox(height: 12),
           Wrap(
             spacing: 8,
             runSpacing: 8,
+            alignment: WrapAlignment.center,
             children: [
               _FilterChip(
-                label: '전체',
+                label: strings.all,
                 isSelected: selectedChannelId == allChannelsFilter,
                 onTap: () => onChanged(allChannelsFilter),
               ),
@@ -315,15 +348,28 @@ class _FilterChip extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return CupertinoButton(
-      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-      color: isSelected ? AppColors.brand : AppColors.elevatedCard,
-      onPressed: onTap,
-      child: Text(
-        label,
-        style: TextStyle(
-          fontSize: 12,
-          color: isSelected ? CupertinoColors.white : AppColors.textSecondary,
+    return GestureDetector(
+      onTap: onTap,
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 200),
+        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+        decoration: BoxDecoration(
+          color: isSelected ? LiquidColors.brand : LiquidColors.glassMid,
+          borderRadius: BorderRadius.circular(LiquidRadius.pill),
+          border: Border.all(
+            color: isSelected ? LiquidColors.brand : LiquidColors.glassStroke,
+            width: 1,
+          ),
+        ),
+        child: Text(
+          label,
+          style: TextStyle(
+            fontSize: 13,
+            fontWeight: FontWeight.w500,
+            color: isSelected
+                ? LiquidColors.textInverse
+                : LiquidColors.textSecondary,
+          ),
         ),
       ),
     );
@@ -331,49 +377,103 @@ class _FilterChip extends StatelessWidget {
 }
 
 class _EmptyState extends StatelessWidget {
-  const _EmptyState();
+  const _EmptyState({
+    required this.label,
+    this.primaryActionLabel,
+    this.onPrimaryAction,
+    this.secondaryActionLabel,
+    this.onSecondaryAction,
+    this.isLoading = false,
+  });
+
+  final String label;
+  final String? primaryActionLabel;
+  final VoidCallback? onPrimaryAction;
+  final String? secondaryActionLabel;
+  final VoidCallback? onSecondaryAction;
+  final bool isLoading;
 
   @override
   Widget build(BuildContext context) {
     return Center(
-      child: Column(
-        mainAxisAlignment: MainAxisAlignment.center,
-        children: const [
-          Icon(CupertinoIcons.play_rectangle, size: 44, color: AppColors.textSecondary),
-          SizedBox(height: 12),
-          Text(
-            '요약된 영상이 아직 없어요.',
-            style: TextStyle(fontSize: 14, color: AppColors.textSecondary),
-          ),
-        ],
+      child: GlassSurface(
+        settings: LiquidGlassPresets.soft,
+        padding: const EdgeInsets.all(32),
+        borderRadius: BorderRadius.circular(LiquidRadius.xl),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Icon(
+              CupertinoIcons.play_rectangle,
+              size: 48,
+              color: LiquidColors.textTertiary,
+            ),
+            const SizedBox(height: 16),
+            Text(
+              label,
+              style: LiquidTextStyles.subheadline,
+              textAlign: TextAlign.center,
+            ),
+            const SizedBox(height: 20),
+            if (isLoading)
+              const CupertinoActivityIndicator()
+            else ...[
+              if (primaryActionLabel != null && onPrimaryAction != null)
+                LiquidGlassButton(
+                  onPressed: onPrimaryAction!,
+                  child: Text(
+                    primaryActionLabel!,
+                    style: LiquidTextStyles.footnote.copyWith(
+                      fontWeight: FontWeight.w600,
+                      color: LiquidColors.brand,
+                    ),
+                  ),
+                ),
+              if (secondaryActionLabel != null && onSecondaryAction != null)
+                Padding(
+                  padding: const EdgeInsets.only(top: 10),
+                  child: CupertinoButton(
+                    padding: EdgeInsets.zero,
+                    onPressed: onSecondaryAction,
+                    child: Text(
+                      secondaryActionLabel!,
+                      style: LiquidTextStyles.footnote.copyWith(
+                        color: LiquidColors.brand,
+                      ),
+                    ),
+                  ),
+                ),
+            ],
+          ],
+        ),
       ),
     );
   }
 }
 
 class _CooldownBanner extends StatelessWidget {
-  const _CooldownBanner({required this.nextChangeAt});
+  const _CooldownBanner({required this.strings, required this.nextChangeAt});
 
+  final AppStrings strings;
   final DateTime nextChangeAt;
 
   @override
   Widget build(BuildContext context) {
-    final label = DateFormat('M월 d일').format(nextChangeAt);
-    return Container(
+    return GlassSurfaceThin(
       padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
-      decoration: BoxDecoration(
-        color: AppColors.elevatedCard,
-        borderRadius: BorderRadius.circular(14),
-        border: Border.all(color: AppColors.divider),
-      ),
+      borderRadius: BorderRadius.circular(LiquidRadius.md),
       child: Row(
         children: [
-          const Icon(CupertinoIcons.timer, size: 16, color: AppColors.brandDark),
-          const SizedBox(width: 8),
+          const Icon(
+            CupertinoIcons.timer,
+            size: 16,
+            color: LiquidColors.accent,
+          ),
+          const SizedBox(width: 10),
           Expanded(
             child: Text(
-              '채널 변경 쿨타임 · 다음 변경 가능: $label',
-              style: const TextStyle(fontSize: 12, color: AppColors.textSecondary),
+              strings.cooldownLabel(nextChangeAt),
+              style: LiquidTextStyles.caption1,
             ),
           ),
         ],

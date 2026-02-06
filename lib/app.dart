@@ -3,6 +3,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import 'router.dart';
 import 'theme.dart';
+import 'widgets/global_toast_listener.dart';
 
 class YouTubeSummaryApp extends ConsumerWidget {
   const YouTubeSummaryApp({super.key});
@@ -15,6 +16,9 @@ class YouTubeSummaryApp extends ConsumerWidget {
       theme: buildCupertinoTheme(),
       debugShowCheckedModeBanner: false,
       routerConfig: router,
+      builder: (context, child) => GlobalToastListener(
+        child: child ?? const SizedBox.shrink(),
+      ),
     );
   }
 }

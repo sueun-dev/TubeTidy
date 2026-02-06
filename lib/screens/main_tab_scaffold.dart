@@ -1,32 +1,45 @@
 import 'package:flutter/cupertino.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../localization/app_strings.dart';
 import '../theme.dart';
 import 'calendar_screen.dart';
+import 'channel_selection_screen.dart';
 import 'home_screen.dart';
 import 'plan_screen.dart';
+import 'settings_screen.dart';
 
-class MainTabScaffold extends StatelessWidget {
+class MainTabScaffold extends ConsumerWidget {
   const MainTabScaffold({super.key});
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context, WidgetRef ref) {
+    final strings = ref.watch(appStringsProvider);
     return CupertinoTabScaffold(
       tabBar: CupertinoTabBar(
-        activeColor: AppColors.brand,
-        inactiveColor: AppColors.textSecondary,
-        backgroundColor: AppColors.background,
-        items: const [
+        activeColor: LiquidColors.brand,
+        inactiveColor: LiquidColors.textSecondary,
+        backgroundColor: const Color(0xE8F7F7FB),
+        items: [
           BottomNavigationBarItem(
-            icon: Icon(CupertinoIcons.house_fill),
-            label: '홈',
+            icon: const Icon(CupertinoIcons.house_fill),
+            label: strings.tabHome,
           ),
           BottomNavigationBarItem(
-            icon: Icon(CupertinoIcons.calendar),
-            label: '캘린더',
+            icon: const Icon(CupertinoIcons.calendar),
+            label: strings.tabCalendar,
           ),
           BottomNavigationBarItem(
-            icon: Icon(CupertinoIcons.creditcard_fill),
-            label: '플랜',
+            icon: const Icon(CupertinoIcons.plus_app_fill),
+            label: strings.tabChannels,
+          ),
+          BottomNavigationBarItem(
+            icon: const Icon(CupertinoIcons.creditcard_fill),
+            label: strings.tabPlan,
+          ),
+          BottomNavigationBarItem(
+            icon: const Icon(CupertinoIcons.settings),
+            label: strings.tabSettings,
           ),
         ],
       ),
@@ -38,8 +51,14 @@ class MainTabScaffold extends StatelessWidget {
                 return const HomeScreen();
               case 1:
                 return const CalendarScreen();
-              default:
+              case 2:
+                return const ChannelSelectionScreen();
+              case 3:
                 return const PlanScreen();
+              case 4:
+                return const SettingsScreen();
+              default:
+                return const HomeScreen();
             }
           },
         );

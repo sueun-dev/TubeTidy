@@ -1,0 +1,28 @@
+[MASTER]
+ignore=build,dist,.venv,venv,__pycache__
+recursive=yes
+
+[MESSAGES CONTROL]
+disable=
+  too-many-branches,
+  too-many-locals,
+  too-many-statements,
+  too-many-arguments,
+  too-many-return-statements,
+  duplicate-code,
+  broad-except
+
+[FORMAT]
+max-line-length=80
+
+[BASIC]
+good-names=i,j,k,ex,Run,_,id,db,ok,fs
+no-docstring-rgx=^_
+
+[DESIGN]
+max-args=10
+min-public-methods=0
+max-module-lines=1500
+
+[REPORTS]
+score=no

@@ -22,6 +22,8 @@ AI-powered YouTube summary app (Flutter) that syncs subscriptions, extracts capt
 - Python 3.9+
 - Google OAuth credentials (iOS + Web)
 - OpenAI API key (for Whisper + summaries)
+- PostgreSQL 14+ (optional, enables server-side persistence)
+- Google ID token verification settings (required for production backend auth)
 
 ## Setup
 ### 1) Install dependencies
@@ -35,7 +37,28 @@ Create `.env` at repo root:
 TRANSCRIPT_API_URL=http://127.0.0.1:5055
 OPENAI_API_KEY=YOUR_OPENAI_API_KEY
 OPENAI_SUMMARY_MODEL=gpt-4.1-nano
+DATABASE_URL=postgresql+psycopg2://youtube_summary:youtube_summary@127.0.0.1:5433/youtube_summary
+# Backend security (recommended for release)
+BACKEND_REQUIRE_AUTH=true
+GOOGLE_WEB_CLIENT_ID=YOUR_WEB_CLIENT_ID.apps.googleusercontent.com
+GOOGLE_IOS_CLIENT_ID=YOUR_IOS_CLIENT_ID.apps.googleusercontent.com
+# Optional: override allowed origins
+# CORS_ALLOWED_ORIGINS=https://your-web-domain.com,https://admin.your-domain.com
+# Optional app metadata
+APP_VERSION=1.0.0
+BUILD_NUMBER=1
+PRIVACY_POLICY_URL=https://example.com/privacy
+TERMS_URL=https://example.com/terms
+SUPPORT_EMAIL=support@example.com
+SUPPORT_URL=https://example.com/support
 ```
+
+### 2.1) (Optional) Start PostgreSQL locally
+```bash
+docker compose up -d postgres
+```
+Default local mapping is `127.0.0.1:5433 -> container:5432`.
+The server auto-creates tables and runtime indexes when `DATABASE_URL` is set.
 
 ### 3) Run transcript server
 ```bash
@@ -48,6 +71,7 @@ OPENAI_SUMMARY_MODEL=gpt-4.1-nano
 flutter run -d web-server \
   --web-port 5201 \
   --dart-define=GOOGLE_WEB_CLIENT_ID=YOUR_WEB_CLIENT_ID.apps.googleusercontent.com \
+  --dart-define=GOOGLE_SERVER_CLIENT_ID=YOUR_WEB_CLIENT_ID.apps.googleusercontent.com \
   --dart-define=TRANSCRIPT_API_URL=http://127.0.0.1:5055
 ```
 
@@ -61,6 +85,15 @@ Then:
 ```bash
 flutter run -d ios
 ```
+
+## Backend Auth (Release)
+- Protected endpoints (`/user`, `/selection`, `/archives`) require Google `Bearer` token when `BACKEND_REQUIRE_AUTH=true`.
+- Flutter app now forwards Google `idToken` automatically after sign-in.
+- For release, keep:
+  - `BACKEND_REQUIRE_AUTH=true`
+  - `GOOGLE_WEB_CLIENT_ID` and/or `GOOGLE_IOS_CLIENT_ID` configured on server.
+- For local troubleshooting only, you can temporarily disable auth:
+  - `BACKEND_REQUIRE_AUTH=false`
 
 ## Google OAuth / YouTube API setup
 1. Create OAuth client IDs (iOS + Web) in Google Cloud Console
@@ -95,6 +128,8 @@ python3 -m http.server 5201 --bind 127.0.0.1 --directory build/web
 ## Testing
 ```bash
 flutter test
+./.venv/bin/python -m unittest server.tests.test_app
+DATABASE_URL=postgresql+psycopg2://youtube_summary:youtube_summary@127.0.0.1:5433/youtube_summary ./.venv/bin/python -m unittest server.tests.test_db_integration
 ```
 
 ---

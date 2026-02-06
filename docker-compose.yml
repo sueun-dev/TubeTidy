@@ -1,0 +1,16 @@
+services:
+  postgres:
+    image: postgres:16
+    container_name: youtube_summary_postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: youtube_summary
+      POSTGRES_USER: youtube_summary
+      POSTGRES_PASSWORD: youtube_summary
+    ports:
+      - "${POSTGRES_HOST_PORT:-5433}:5432"
+    volumes:
+      - youtube_summary_postgres:/var/lib/postgresql/data
+
+volumes:
+  youtube_summary_postgres:

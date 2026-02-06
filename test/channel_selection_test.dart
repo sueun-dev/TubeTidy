@@ -6,7 +6,7 @@ import 'package:youtube_summary/models/channel.dart';
 import 'package:youtube_summary/models/plan.dart';
 import 'package:youtube_summary/models/user.dart';
 import 'package:youtube_summary/screens/channel_selection_screen.dart';
-import 'package:youtube_summary/state/app_state.dart';
+import 'package:youtube_summary/state/app_controller.dart';
 
 void main() {
   testWidgets('Channel selection lists channels', (WidgetTester tester) async {
@@ -32,7 +32,8 @@ void main() {
       ProviderScope(
         overrides: [
           appControllerProvider.overrideWith(
-            (ref) => AppController(ref, initialState: state, restoreSession: false),
+            (ref) =>
+                AppController(ref, initialState: state, restoreSession: false),
           ),
         ],
         child: const CupertinoApp(home: ChannelSelectionScreen()),
