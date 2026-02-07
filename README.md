@@ -69,9 +69,8 @@ The server auto-creates tables and runtime indexes when `DATABASE_URL` is set.
 **Web (local testing)**
 ```bash
 flutter run -d web-server \
-  --web-port 5201 \
+  --web-port 5301 \
   --dart-define=GOOGLE_WEB_CLIENT_ID=YOUR_WEB_CLIENT_ID.apps.googleusercontent.com \
-  --dart-define=GOOGLE_SERVER_CLIENT_ID=YOUR_WEB_CLIENT_ID.apps.googleusercontent.com \
   --dart-define=TRANSCRIPT_API_URL=http://127.0.0.1:5055
 ```
 
@@ -99,14 +98,14 @@ flutter run -d ios
 1. Create OAuth client IDs (iOS + Web) in Google Cloud Console
 2. Enable **YouTube Data API v3**
 3. Add authorized JavaScript origins for web:
-   - `http://127.0.0.1:5201`
-   - `http://localhost:5201`
+   - `http://127.0.0.1:5301`
+   - `http://localhost:5301`
 
 ## Optional: Web auto sign-in
-Web auto sign-in is **disabled by default** to avoid FedCM/CORS issues.
-Enable with:
+Web auto sign-in is **enabled by default**.
+Disable it only when debugging FedCM/CORS/popup issues:
 ```bash
---dart-define=WEB_AUTO_SIGNIN=true
+--dart-define=WEB_AUTO_SIGNIN=false
 ```
 
 ## Optional: Cookies for restricted videos
@@ -122,7 +121,7 @@ YTDLP_COOKIES_FROM_BROWSER=chrome
 flutter build web \
   --dart-define=GOOGLE_WEB_CLIENT_ID=YOUR_WEB_CLIENT_ID.apps.googleusercontent.com \
   --dart-define=TRANSCRIPT_API_URL=http://127.0.0.1:5055
-python3 -m http.server 5201 --bind 127.0.0.1 --directory build/web
+python3 -m http.server 5301 --bind 127.0.0.1 --directory build/web
 ```
 
 ## Testing

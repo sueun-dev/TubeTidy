@@ -10,16 +10,25 @@ import 'plan_screen.dart';
 import 'settings_screen.dart';
 
 class MainTabScaffold extends ConsumerWidget {
-  const MainTabScaffold({super.key});
+  const MainTabScaffold({super.key, this.initialTabIndex = 0});
+
+  final int initialTabIndex;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final strings = ref.watch(appStringsProvider);
     return CupertinoTabScaffold(
       tabBar: CupertinoTabBar(
+        currentIndex: initialTabIndex,
         activeColor: LiquidColors.brand,
         inactiveColor: LiquidColors.textSecondary,
-        backgroundColor: const Color(0xE8F7F7FB),
+        backgroundColor: const Color(0xF5F7F7FB),
+        border: const Border(
+          top: BorderSide(
+            color: LiquidColors.separatorLight,
+            width: 0.7,
+          ),
+        ),
         items: [
           BottomNavigationBarItem(
             icon: const Icon(CupertinoIcons.house_fill),

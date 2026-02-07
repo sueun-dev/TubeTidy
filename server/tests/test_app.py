@@ -84,6 +84,30 @@ class AppTestCase(unittest.TestCase):
         )
         self.assertEqual(response.status_code, 400)
 
+    def test_user_state_defaults_without_db(self) -> None:
+        """User state endpoint should return sane defaults when DB is disabled."""
+        response = self.client.get('/user/state', params={'user_id': 'user_1234'})
+        self.assertEqual(response.status_code, 200)
+        body = response.json()
+        self.assertEqual(body.get('selection_change_day'), 0)
+        self.assertEqual(body.get('selection_changes_today'), 0)
+        self.assertEqual(body.get('opened_video_ids'), [])
+
+    def test_cors_allows_localhost_5301_preflight(self) -> None:
+        """Default CORS should include local web dev port 5301."""
+        response = self.client.options(
+            '/user/upsert',
+            headers={
+                'Origin': 'http://localhost:5301',
+                'Access-Control-Request-Method': 'POST',
+            },
+        )
+        self.assertLess(response.status_code, 400)
+        self.assertEqual(
+            response.headers.get('access-control-allow-origin'),
+            'http://localhost:5301',
+        )
+
 
 if __name__ == '__main__':
     unittest.main()

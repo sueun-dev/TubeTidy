@@ -163,6 +163,35 @@ class DatabaseIntegrationTest(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json().get('items', []), [])
 
+    def test_user_state_roundtrip(self) -> None:
+        """Persist and fetch per-user app state using the database."""
+        user_id = f'user_{uuid.uuid4().hex}'
+        payload = {
+            'user_id': user_id,
+            'selection_change_day': 20260206,
+            'selection_changes_today': 1,
+            'opened_video_ids': ['abc12345xyz', 'abc12345xyz', 'def67890uvw'],
+        }
+        response = self.client.post('/user/state', json=payload)
+        self.assertEqual(response.status_code, 200)
+        body = response.json()
+        self.assertEqual(body.get('selection_change_day'), 20260206)
+        self.assertEqual(body.get('selection_changes_today'), 1)
+        self.assertEqual(
+            body.get('opened_video_ids'),
+            ['abc12345xyz', 'def67890uvw'],
+        )
+
+        response = self.client.get('/user/state', params={'user_id': user_id})
+        self.assertEqual(response.status_code, 200)
+        body = response.json()
+        self.assertEqual(body.get('selection_change_day'), 20260206)
+        self.assertEqual(body.get('selection_changes_today'), 1)
+        self.assertEqual(
+            body.get('opened_video_ids'),
+            ['abc12345xyz', 'def67890uvw'],
+        )
+
 
 if __name__ == '__main__':
     unittest.main()

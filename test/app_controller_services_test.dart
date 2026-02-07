@@ -12,6 +12,7 @@ import 'package:youtube_summary/services/selection_change_cache.dart';
 import 'package:youtube_summary/services/transcript_cache.dart';
 import 'package:youtube_summary/services/video_history_cache.dart';
 import 'package:youtube_summary/services/user_service.dart';
+import 'package:youtube_summary/services/user_state_service.dart';
 import 'package:youtube_summary/services/youtube_api.dart';
 import 'package:youtube_summary/state/app_controller.dart';
 
@@ -76,6 +77,21 @@ class _NoopUserService implements UserServiceApi {
   Future<bool> updatePlan(String userId, String planTier) async => true;
 }
 
+class _NoopUserStateService implements UserStateServiceApi {
+  @override
+  Future<UserStatePayload?> fetchState(String userId) async => null;
+
+  @override
+  Future<bool> saveState({
+    required String userId,
+    required int selectionChangeDay,
+    required int selectionChangesToday,
+    required List<String> openedVideoIds,
+  }) async {
+    return true;
+  }
+}
+
 void main() {
   test('AppController uses injected transcript service', () async {
     SharedPreferences.setMockInitialValues({});
@@ -92,6 +108,7 @@ void main() {
       archiveService: _NoopArchiveService(),
       selectionService: _NoopSelectionService(),
       userService: _NoopUserService(),
+      userStateService: _NoopUserStateService(),
       transcriptService: fakeService,
       youtubeApiFactory: (_) => YouTubeApi(authHeaders: const {}),
       billingServiceFactory: () async => null,

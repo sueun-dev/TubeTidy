@@ -106,7 +106,7 @@ class HomeScreen extends ConsumerWidget {
                     primaryActionLabel: strings.reload,
                     onPrimaryAction: controller.refreshHome,
                     secondaryActionLabel: strings.manageChannels,
-                    onSecondaryAction: () => context.push('/channels'),
+                    onSecondaryAction: () => context.go('/app?tab=2'),
                   ),
                 )
               else
@@ -348,27 +348,34 @@ class _FilterChip extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return GestureDetector(
-      onTap: onTap,
-      child: AnimatedContainer(
-        duration: const Duration(milliseconds: 200),
-        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
-        decoration: BoxDecoration(
-          color: isSelected ? LiquidColors.brand : LiquidColors.glassMid,
-          borderRadius: BorderRadius.circular(LiquidRadius.pill),
-          border: Border.all(
-            color: isSelected ? LiquidColors.brand : LiquidColors.glassStroke,
-            width: 1,
+    return Semantics(
+      button: true,
+      selected: isSelected,
+      label: label,
+      child: CupertinoButton(
+        padding: EdgeInsets.zero,
+        minimumSize: Size.zero,
+        onPressed: onTap,
+        child: AnimatedContainer(
+          duration: const Duration(milliseconds: 200),
+          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+          decoration: BoxDecoration(
+            color: isSelected ? LiquidColors.brand : LiquidColors.glassMid,
+            borderRadius: BorderRadius.circular(LiquidRadius.pill),
+            border: Border.all(
+              color: isSelected ? LiquidColors.brand : LiquidColors.glassStroke,
+              width: 1,
+            ),
           ),
-        ),
-        child: Text(
-          label,
-          style: TextStyle(
-            fontSize: 13,
-            fontWeight: FontWeight.w500,
-            color: isSelected
-                ? LiquidColors.textInverse
-                : LiquidColors.textSecondary,
+          child: Text(
+            label,
+            style: TextStyle(
+              fontSize: 13,
+              fontWeight: FontWeight.w500,
+              color: isSelected
+                  ? LiquidColors.textInverse
+                  : LiquidColors.textSecondary,
+            ),
           ),
         ),
       ),
