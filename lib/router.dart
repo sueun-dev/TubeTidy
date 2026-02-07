@@ -28,7 +28,14 @@ final routerProvider = Provider<GoRouter>((ref) {
       ),
       GoRoute(
         path: '/app',
-        builder: (context, state) => const MainTabScaffold(),
+        builder: (context, state) {
+          final rawTab = state.uri.queryParameters['tab'];
+          final parsedTab = int.tryParse(rawTab ?? '');
+          final tabIndex = parsedTab != null && parsedTab >= 0 && parsedTab <= 4
+              ? parsedTab
+              : 0;
+          return MainTabScaffold(initialTabIndex: tabIndex);
+        },
       ),
       GoRoute(
         path: '/plan',

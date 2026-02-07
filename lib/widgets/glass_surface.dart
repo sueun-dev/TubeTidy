@@ -177,8 +177,10 @@ class LiquidGlassButton extends StatelessWidget {
       );
     }
 
-    return GestureDetector(
-      onTap: onPressed,
+    return CupertinoButton(
+      padding: EdgeInsets.zero,
+      minimumSize: Size.zero,
+      onPressed: onPressed,
       child: GlassSurface(
         settings: LiquidGlassPresets.button,
         borderRadius: BorderRadius.circular(LiquidRadius.sm),

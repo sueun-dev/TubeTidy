@@ -5,8 +5,8 @@ class AppConfig {
       String.fromEnvironment('GOOGLE_SERVER_CLIENT_ID');
   static const transcriptApiUrl = String.fromEnvironment('TRANSCRIPT_API_URL');
   static const webAutoSignIn =
-      String.fromEnvironment('WEB_AUTO_SIGNIN', defaultValue: 'false') ==
-          'true';
+      String.fromEnvironment('WEB_AUTO_SIGNIN', defaultValue: 'true') !=
+          'false';
   static const appVersion = String.fromEnvironment('APP_VERSION');
   static const buildNumber = String.fromEnvironment('BUILD_NUMBER');
   static const privacyPolicyUrl = String.fromEnvironment('PRIVACY_POLICY_URL');

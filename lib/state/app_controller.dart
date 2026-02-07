@@ -179,13 +179,18 @@ class AppController extends StateNotifier<AppStateData> {
               clientId: AppConfig.googleWebClientId.isNotEmpty
                   ? AppConfig.googleWebClientId
                   : null,
-              serverClientId: AppConfig.googleServerClientId.isNotEmpty
-                  ? AppConfig.googleServerClientId
-                  : null,
+              // google_sign_in_web does not support serverClientId.
+              serverClientId:
+                  !kIsWeb && AppConfig.googleServerClientId.isNotEmpty
+                      ? AppConfig.googleServerClientId
+                      : null,
             ),
         super(initialState ?? AppStateData.initial()) {
     _accountSubscription =
         _googleSignIn.onCurrentUserChanged.listen(_handleAccountChange);
+    if (kIsWeb) {
+      _primeGoogleSignInForWeb();
+    }
     if (restoreSession) {
       _restoreSession();
     }
@@ -206,6 +211,10 @@ class AppController extends StateNotifier<AppStateData> {
   static const List<String> _youtubeScopes = <String>[
     'https://www.googleapis.com/auth/youtube.readonly',
   ];
+  static const Duration _scopeCheckTimeout = Duration(seconds: 8);
+  static const Duration _scopeRequestTimeout = Duration(seconds: 20);
+  static const Duration _authHeadersTimeout = Duration(seconds: 12);
+  static const Duration _initialSyncTimeout = Duration(seconds: 25);
   bool _isRestoringSession = false;
 
   DateTime _now() => _services.now();
@@ -372,7 +381,10 @@ class AppController extends StateNotifier<AppStateData> {
       if (shouldConsumeChange) {
         _recordSelectionChange();
       }
-      await _persistSelectionToServer();
+      final saved = await _persistSelectionToServer();
+      if (!saved) {
+        throw Exception('채널 선택 저장에 실패했습니다.');
+      }
       state = state.copyWith(
         selectionCompleted: true,
         selectionChangePending: false,
@@ -654,6 +666,10 @@ class AppController extends StateNotifier<AppStateData> {
       // Ignore cache failures.
     }
     state = state.copyWith(openedVideoIds: const <String>{});
+    final synced = await _persistUserStateToServer(openedVideoIds: <String>{});
+    if (!synced) {
+      _setToast('시청 기록 서버 동기화에 실패했습니다.');
+    }
   }
 
   Future<void> clearFavorites() async {
@@ -685,6 +701,13 @@ class AppController extends StateNotifier<AppStateData> {
     } catch (_) {
       // Ignore cache failures.
     }
+    final synced = await _persistUserStateToServer(
+      selectionChangeDay: 0,
+      selectionChangesToday: 0,
+    );
+    if (!synced) {
+      _setToast('채널 변경 상태 서버 동기화에 실패했습니다.');
+    }
   }
 
   Future<void> resetChannelSelection() async {
@@ -704,11 +727,19 @@ class AppController extends StateNotifier<AppStateData> {
     );
     final userId = state.user?.id;
     if (userId == null) return;
+    final saved = await _persistSelectionToServer();
     try {
       final cache = await _services.selectionChangeCache;
       await cache.clear(userId);
     } catch (_) {
       // Ignore cache failures.
+    }
+    final synced = await _persistUserStateToServer(
+      selectionChangeDay: 0,
+      selectionChangesToday: 0,
+    );
+    if (!saved || !synced) {
+      _setToast('채널 선택 초기화 상태를 서버에 저장하지 못했습니다.');
     }
   }
 
@@ -729,41 +760,104 @@ class AppController extends StateNotifier<AppStateData> {
   Future<void> _loadSelectionChangeState() async {
     final userId = state.user?.id;
     if (userId == null) return;
+    SelectionChangeState? localData;
     try {
       final cache = await _services.selectionChangeCache;
-      final data = await cache.read(userId);
-      if (data == null) {
-        state = state.copyWith(
-          selectionChangeDay: 0,
-          selectionChangesToday: 0,
-          dailySwapAddedId: null,
-          dailySwapRemovedId: null,
-          selectionChangePending: false,
-        );
-        return;
+      localData = await cache.read(userId);
+    } catch (_) {
+      localData = null;
+    }
+
+    final remote = await _services.userStateService.fetchState(userId);
+    if (remote != null) {
+      var mergedDay = remote.selectionChangeDay;
+      var mergedCount = remote.selectionChangesToday;
+      if (localData != null) {
+        if (localData.dayKey > mergedDay) {
+          mergedDay = localData.dayKey;
+          mergedCount = localData.changesToday;
+        } else if (localData.dayKey == mergedDay &&
+            localData.changesToday > mergedCount) {
+          mergedCount = localData.changesToday;
+        }
       }
       state = state.copyWith(
-        selectionChangeDay: data.dayKey,
-        selectionChangesToday: data.changesToday,
+        selectionChangeDay: mergedDay,
+        selectionChangesToday: mergedCount,
         dailySwapAddedId: null,
         dailySwapRemovedId: null,
         selectionChangePending: false,
       );
-    } catch (_) {
-      // Ignore cache read failures.
+      try {
+        final cache = await _services.selectionChangeCache;
+        await cache.write(
+          userId,
+          SelectionChangeState(
+            dayKey: mergedDay,
+            changesToday: mergedCount,
+          ),
+        );
+      } catch (_) {
+        // Ignore cache write failures.
+      }
+      if (mergedDay != remote.selectionChangeDay ||
+          mergedCount != remote.selectionChangesToday) {
+        await _persistUserStateToServer(
+          selectionChangeDay: mergedDay,
+          selectionChangesToday: mergedCount,
+        );
+      }
+      return;
     }
+
+    if (localData == null) {
+      state = state.copyWith(
+        selectionChangeDay: 0,
+        selectionChangesToday: 0,
+        dailySwapAddedId: null,
+        dailySwapRemovedId: null,
+        selectionChangePending: false,
+      );
+      return;
+    }
+    state = state.copyWith(
+      selectionChangeDay: localData.dayKey,
+      selectionChangesToday: localData.changesToday,
+      dailySwapAddedId: null,
+      dailySwapRemovedId: null,
+      selectionChangePending: false,
+    );
   }
 
   Future<void> _loadVideoHistoryState() async {
     final userId = state.user?.id;
     if (userId == null) return;
+    Set<String> localIds = <String>{};
     try {
       final cache = await _services.videoHistoryCache;
-      final ids = await cache.read(userId);
-      state = state.copyWith(openedVideoIds: Set.unmodifiable(ids));
+      localIds = await cache.read(userId);
     } catch (_) {
-      // Ignore cache failures.
+      localIds = <String>{};
     }
+
+    final remote = await _services.userStateService.fetchState(userId);
+    if (remote != null) {
+      final merged = <String>{...remote.openedVideoIds, ...localIds};
+      state = state.copyWith(
+        openedVideoIds: Set.unmodifiable(merged),
+      );
+      try {
+        final cache = await _services.videoHistoryCache;
+        await cache.write(userId, merged);
+      } catch (_) {
+        // Ignore cache write failures.
+      }
+      if (merged.length != remote.openedVideoIds.length) {
+        await _persistUserStateToServer(openedVideoIds: merged);
+      }
+      return;
+    }
+    state = state.copyWith(openedVideoIds: Set.unmodifiable(localIds));
   }
 
   Future<void> recordVideoInteraction(String videoId) async {
@@ -778,6 +872,7 @@ class AppController extends StateNotifier<AppStateData> {
     } catch (_) {
       // Ignore cache failures.
     }
+    await _persistUserStateToServer(openedVideoIds: updated);
   }
 
   bool _canChangeSelectionToday() {
@@ -839,6 +934,10 @@ class AppController extends StateNotifier<AppStateData> {
     } catch (_) {
       // Ignore cache failures.
     }
+    await _persistUserStateToServer(
+      selectionChangeDay: dayKey,
+      selectionChangesToday: count,
+    );
   }
 
   Future<void> _restoreSession() async {
@@ -867,15 +966,27 @@ class AppController extends StateNotifier<AppStateData> {
     _setLoading(false);
   }
 
+  Future<void> _primeGoogleSignInForWeb() async {
+    try {
+      await _googleSignIn.isSignedIn();
+    } catch (_) {
+      // Ignore initialization failures; user-triggered login still works.
+    }
+  }
+
   void _handleAccountChange(GoogleSignInAccount? account) {
     if (account == null) return;
     if (_googleAccount?.id == account.id && _authHeaders != null) {
       unawaited(_refreshBackendAuthToken(account));
       return;
     }
+    // On web, requesting extra OAuth scopes from this async callback can be
+    // blocked as a popup by browsers. Ask scopes from explicit user actions
+    // (e.g., refresh button) instead.
+    final allowInteractiveScopes = !_isRestoringSession && !kIsWeb;
     _processSignedInAccount(
       account,
-      allowInteractive: !_isRestoringSession,
+      allowInteractive: allowInteractiveScopes,
     );
   }
 
@@ -902,7 +1013,11 @@ class AppController extends StateNotifier<AppStateData> {
         await Future.wait([
           _connectAndSyncYouTube(allowInteractive: allowInteractive),
           _loadArchivesFromServer(),
-        ]);
+        ]).timeout(_initialSyncTimeout);
+      } on TimeoutException {
+        if (showErrors) {
+          _setToast('동기화 시간이 초과되었습니다. 새로고침 후 다시 시도해주세요.');
+        }
       } catch (error) {
         if (showErrors) {
           _setToast(kDebugMode
@@ -985,22 +1100,56 @@ class AppController extends StateNotifier<AppStateData> {
     final userId = state.user?.id;
     if (userId == null) return;
     final selected = await _services.selectionService.fetchSelection(userId);
-    if (selected == null || selected.isEmpty) return;
+    if (selected == null) return;
+    if (selected.isEmpty) {
+      state = state.copyWith(
+        selectedChannelIds: const <String>{},
+        selectionCompleted: false,
+      );
+      return;
+    }
     final available = state.channels.map((channel) => channel.id).toSet();
     final filtered = selected.where(available.contains).toSet();
-    if (filtered.isEmpty) return;
+    if (filtered.isEmpty) {
+      state = state.copyWith(
+        selectedChannelIds: const <String>{},
+        selectionCompleted: false,
+      );
+      return;
+    }
     final limit = state.channelLimit;
     final limited = limit > 0 ? filtered.take(limit).toSet() : filtered;
-    state = state.copyWith(selectedChannelIds: Set.unmodifiable(limited));
+    state = state.copyWith(
+      selectedChannelIds: Set.unmodifiable(limited),
+      selectionCompleted: true,
+    );
+    _loadSelectedVideosSilently();
   }
 
-  Future<void> _persistSelectionToServer() async {
+  Future<bool> _persistSelectionToServer() async {
     final userId = state.user?.id;
-    if (userId == null) return;
-    await _services.selectionService.saveSelection(
+    if (userId == null) return false;
+    return _services.selectionService.saveSelection(
       userId: userId,
       channels: state.channels,
       selectedIds: state.selectedChannelIds,
+    );
+  }
+
+  Future<bool> _persistUserStateToServer({
+    int? selectionChangeDay,
+    int? selectionChangesToday,
+    Set<String>? openedVideoIds,
+  }) async {
+    final userId = state.user?.id;
+    if (userId == null) return false;
+    return _services.userStateService.saveState(
+      userId: userId,
+      selectionChangeDay: selectionChangeDay ?? state.selectionChangeDay,
+      selectionChangesToday:
+          selectionChangesToday ?? state.selectionChangesToday,
+      openedVideoIds:
+          (openedVideoIds ?? state.openedVideoIds).toList(growable: false),
     );
   }
 
@@ -1058,7 +1207,9 @@ class AppController extends StateNotifier<AppStateData> {
       bool canAccess = false;
       if (!forceRefresh) {
         try {
-          canAccess = await _googleSignIn.canAccessScopes(_youtubeScopes);
+          canAccess = await _googleSignIn
+              .canAccessScopes(_youtubeScopes)
+              .timeout(_scopeCheckTimeout);
         } catch (_) {
           canAccess = false;
         }
@@ -1067,13 +1218,41 @@ class AppController extends StateNotifier<AppStateData> {
         if (!allowInteractive) {
           throw Exception('YouTube 권한이 필요합니다.');
         }
-        final granted = await _googleSignIn.requestScopes(_youtubeScopes);
+        bool granted;
+        try {
+          granted = await _googleSignIn
+              .requestScopes(_youtubeScopes)
+              .timeout(_scopeRequestTimeout);
+        } on TimeoutException {
+          throw Exception(
+            'YouTube 권한 승인 대기 시간이 초과되었습니다. '
+            '브라우저 팝업 차단을 해제하고 다시 시도해주세요.',
+          );
+        } catch (error) {
+          final raw = error.toString().toLowerCase();
+          if (raw.contains('popup_failed_to_open') ||
+              (raw.contains('popup') && raw.contains('block'))) {
+            throw Exception(
+              '브라우저가 권한 팝업을 차단했습니다. '
+              '팝업 허용 후 다시 시도해주세요.',
+            );
+          }
+          throw Exception('YouTube 권한 요청에 실패했습니다. 다시 시도해주세요.');
+        }
         if (!granted) {
           throw Exception('YouTube 권한이 필요합니다.');
         }
       }
     }
-    _authHeaders = await _googleAccount!.authHeaders;
+    try {
+      _authHeaders =
+          await _googleAccount!.authHeaders.timeout(_authHeadersTimeout);
+    } on TimeoutException {
+      throw Exception(
+        'Google 인증 토큰을 가져오지 못했습니다. '
+        '다시 로그인하거나 새로고침 후 재시도해주세요.',
+      );
+    }
     await _refreshBackendAuthToken(_googleAccount!);
   }
 

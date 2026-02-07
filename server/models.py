@@ -30,6 +30,23 @@ class User(Base):
     )
 
 
+class UserState(Base):
+    """Per-user app state that must sync across devices."""
+    __tablename__ = 'user_state'
+
+    user_id: Mapped[str] = mapped_column(
+        String(64), ForeignKey('users.id'), primary_key=True
+    )
+    selection_change_day: Mapped[int] = mapped_column(Integer, default=0)
+    selection_changes_today: Mapped[int] = mapped_column(Integer, default=0)
+    opened_video_ids: Mapped[str] = mapped_column(Text, default='[]')
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+        onupdate=lambda: datetime.now(timezone.utc),
+    )
+
+
 class Channel(Base):
     """YouTube channel metadata."""
     __tablename__ = 'channels'

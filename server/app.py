@@ -19,13 +19,21 @@ import requests
 from dotenv import load_dotenv
 from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from yt_dlp import YoutubeDL
 from yt_dlp.utils import DownloadError
 
 from .db import check_db, get_session, init_db, is_db_enabled
-from .models import Archive, Channel, TranscriptCache, User, UserChannel, Video
+from .models import (
+    Archive,
+    Channel,
+    TranscriptCache,
+    User,
+    UserChannel,
+    UserState,
+    Video,
+)
 
 ROOT = Path(__file__).resolve().parents[1]
 load_dotenv(ROOT / '.env')
@@ -59,7 +67,10 @@ USER_AGENT = os.getenv(
 
 _cors_env = os.getenv(
     'CORS_ALLOWED_ORIGINS',
-    'http://localhost:5201,http://127.0.0.1:5201',
+    (
+        'http://localhost:5201,http://127.0.0.1:5201,'
+        'http://localhost:5301,http://127.0.0.1:5301'
+    ),
 )
 ALLOWED_ORIGINS = tuple(
     origin.strip()
@@ -70,6 +81,9 @@ ALLOW_CREDENTIALS = '*' not in ALLOWED_ORIGINS
 BACKEND_REQUIRE_AUTH = os.getenv(
     'BACKEND_REQUIRE_AUTH', 'true'
 ).strip().lower() not in {'0', 'false', 'no'}
+ENABLE_API_DOCS = os.getenv(
+    'ENABLE_API_DOCS', 'false'
+).strip().lower() in {'1', 'true', 'yes'}
 AUTH_CLOCK_SKEW_SECONDS = int(os.getenv('AUTH_CLOCK_SKEW_SECONDS', '120'))
 GOOGLE_TOKENINFO_URL = os.getenv(
     'GOOGLE_TOKENINFO_URL',
@@ -102,6 +116,9 @@ PLAN_TIER_PATTERN = re.compile(r'^(free|starter|growth|unlimited|lifetime)$')
 MAX_SELECTION_CHANNELS = int(os.getenv('MAX_SELECTION_CHANNELS', '200'))
 MAX_CHANNEL_TITLE_LENGTH = 255
 MAX_CHANNEL_THUMBNAIL_LENGTH = 2048
+MAX_OPENED_VIDEO_IDS = int(os.getenv('MAX_OPENED_VIDEO_IDS', '500'))
+MAX_SELECTION_CHANGE_DAY = 99991231
+MAX_SELECTION_CHANGES_TODAY = 31
 ARCHIVE_PLACEHOLDER_CHANNEL_ID = '__archive_channel__'
 ARCHIVE_PLACEHOLDER_CHANNEL_TITLE = 'Archived videos'
 ARCHIVE_PLACEHOLDER_VIDEO_TITLE = 'Archived video'
@@ -128,7 +145,12 @@ async def app_lifespan(_: FastAPI):
     yield
 
 
-app = FastAPI(lifespan=app_lifespan)
+app = FastAPI(
+    lifespan=app_lifespan,
+    docs_url='/docs' if ENABLE_API_DOCS else None,
+    redoc_url='/redoc' if ENABLE_API_DOCS else None,
+    openapi_url='/openapi.json' if ENABLE_API_DOCS else None,
+)
 
 app.add_middleware(
     CORSMiddleware,
@@ -148,6 +170,15 @@ async def apply_security_headers(request: Request, call_next):
     response.headers.setdefault('X-Content-Type-Options', 'nosniff')
     response.headers.setdefault('X-Frame-Options', 'DENY')
     response.headers.setdefault('Referrer-Policy', 'no-referrer')
+    response.headers.setdefault(
+        'Content-Security-Policy',
+        "default-src 'none'; frame-ancestors 'none'; base-uri 'none'",
+    )
+    response.headers.setdefault(
+        'Permissions-Policy',
+        'geolocation=(), microphone=(), camera=()',
+    )
+    response.headers.setdefault('Cross-Origin-Resource-Policy', 'same-site')
     response.headers.setdefault('Cache-Control', 'no-store')
     if request.url.scheme == 'https':
         response.headers.setdefault(
@@ -207,6 +238,44 @@ def _sanitize_plan_tier(raw_plan_tier: str) -> str:
     if not PLAN_TIER_PATTERN.fullmatch(plan_tier):
         raise HTTPException(status_code=400, detail='plan_tier is invalid')
     return plan_tier
+
+
+def _sanitize_selection_change_day(raw_day: Optional[int]) -> int:
+    if raw_day is None:
+        return 0
+    value = int(raw_day)
+    if value < 0:
+        return 0
+    if value > MAX_SELECTION_CHANGE_DAY:
+        return MAX_SELECTION_CHANGE_DAY
+    return value
+
+
+def _sanitize_selection_changes_today(raw_count: Optional[int]) -> int:
+    if raw_count is None:
+        return 0
+    value = int(raw_count)
+    if value < 0:
+        return 0
+    if value > MAX_SELECTION_CHANGES_TODAY:
+        return MAX_SELECTION_CHANGES_TODAY
+    return value
+
+
+def _normalize_opened_video_ids(raw_ids: list[str]) -> list[str]:
+    normalized = []
+    seen = set()
+    for raw in raw_ids:
+        video_id = raw.strip()
+        if not VIDEO_ID_PATTERN.fullmatch(video_id):
+            continue
+        if video_id in seen:
+            continue
+        seen.add(video_id)
+        normalized.append(video_id)
+        if len(normalized) >= MAX_OPENED_VIDEO_IDS:
+            break
+    return normalized
 
 
 def _sanitize_email(raw_email: Optional[str]) -> Optional[str]:
@@ -382,6 +451,14 @@ class UserPlanRequest(BaseModel):
     """Payload for updating a user's plan tier."""
     user_id: str
     plan_tier: str
+
+
+class UserStateUpsertRequest(BaseModel):
+    """Payload for upserting per-user app state."""
+    user_id: str
+    selection_change_day: Optional[int] = 0
+    selection_changes_today: Optional[int] = 0
+    opened_video_ids: list[str] = Field(default_factory=list)
 
 
 class ChannelPayload(BaseModel):
@@ -697,6 +774,111 @@ def update_user_plan(
     except SQLAlchemyError as exc:
         raise HTTPException(
             status_code=500, detail='plan update failed'
+        ) from exc
+
+
+@app.get('/user/state')
+def get_user_state(
+    user_id: str,
+    authorization: Optional[str] = Header(default=None),
+):
+    """Fetch per-user app state for cross-device sync."""
+    user_id = _authorize_user(user_id, authorization)
+    default_payload = {
+        'selection_change_day': 0,
+        'selection_changes_today': 0,
+        'opened_video_ids': [],
+    }
+    if not is_db_enabled():
+        return default_payload
+    try:
+        with get_session() as session:
+            if session is None:
+                raise HTTPException(
+                    status_code=500,
+                    detail='database not available',
+                )
+            state = (
+                session.query(UserState)
+                .filter(UserState.user_id == user_id)
+                .first()
+            )
+            if state is None:
+                return default_payload
+            try:
+                raw_ids = json.loads(state.opened_video_ids or '[]')
+                if not isinstance(raw_ids, list):
+                    raw_ids = []
+            except ValueError:
+                raw_ids = []
+            opened_video_ids = _normalize_opened_video_ids(
+                [str(item) for item in raw_ids]
+            )
+            return {
+                'selection_change_day': _sanitize_selection_change_day(
+                    state.selection_change_day
+                ),
+                'selection_changes_today': _sanitize_selection_changes_today(
+                    state.selection_changes_today
+                ),
+                'opened_video_ids': opened_video_ids,
+            }
+    except SQLAlchemyError:
+        return default_payload
+
+
+@app.post('/user/state')
+def upsert_user_state(
+    req: UserStateUpsertRequest,
+    authorization: Optional[str] = Header(default=None),
+):
+    """Upsert per-user app state for cross-device sync."""
+    user_id = _authorize_user(req.user_id, authorization)
+    selection_change_day = _sanitize_selection_change_day(
+        req.selection_change_day
+    )
+    selection_changes_today = _sanitize_selection_changes_today(
+        req.selection_changes_today
+    )
+    opened_video_ids = _normalize_opened_video_ids(req.opened_video_ids)
+    payload = {
+        'selection_change_day': selection_change_day,
+        'selection_changes_today': selection_changes_today,
+        'opened_video_ids': opened_video_ids,
+    }
+    if not is_db_enabled():
+        return payload
+    try:
+        with get_session() as session:
+            if session is None:
+                raise HTTPException(
+                    status_code=500,
+                    detail='database not available',
+                )
+            user = session.query(User).filter(User.id == user_id).first()
+            if user is None:
+                user = User(id=user_id, plan_tier='free')
+                session.add(user)
+                session.flush()
+
+            state = (
+                session.query(UserState)
+                .filter(UserState.user_id == user_id)
+                .first()
+            )
+            if state is None:
+                state = UserState(user_id=user_id)
+
+            state.selection_change_day = selection_change_day
+            state.selection_changes_today = selection_changes_today
+            state.opened_video_ids = json.dumps(opened_video_ids)
+            state.updated_at = datetime.now(timezone.utc)
+            session.add(state)
+            session.commit()
+            return payload
+    except SQLAlchemyError as exc:
+        raise HTTPException(
+            status_code=500, detail='user state upsert failed'
         ) from exc
 
 

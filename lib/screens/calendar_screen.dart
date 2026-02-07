@@ -420,27 +420,34 @@ class _FilterChip extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return GestureDetector(
-      onTap: onTap,
-      child: AnimatedContainer(
-        duration: const Duration(milliseconds: 180),
-        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-        decoration: BoxDecoration(
-          color: isSelected
-              ? LiquidColors.brand.withValues(alpha: 0.16)
-              : LiquidColors.glassDark.withValues(alpha: 0.25),
-          borderRadius: BorderRadius.circular(LiquidRadius.sm),
-          border: Border.all(
-            color: isSelected ? LiquidColors.brand : LiquidColors.glassStroke,
-          ),
-        ),
-        child: Text(
-          label,
-          style: LiquidTextStyles.caption1.copyWith(
+    return Semantics(
+      button: true,
+      selected: isSelected,
+      label: label,
+      child: CupertinoButton(
+        padding: EdgeInsets.zero,
+        minimumSize: Size.zero,
+        onPressed: onTap,
+        child: AnimatedContainer(
+          duration: const Duration(milliseconds: 180),
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+          decoration: BoxDecoration(
             color: isSelected
-                ? LiquidColors.brandDark
-                : LiquidColors.textSecondary,
-            fontWeight: FontWeight.w600,
+                ? LiquidColors.brand.withValues(alpha: 0.16)
+                : LiquidColors.glassDark.withValues(alpha: 0.25),
+            borderRadius: BorderRadius.circular(LiquidRadius.sm),
+            border: Border.all(
+              color: isSelected ? LiquidColors.brand : LiquidColors.glassStroke,
+            ),
+          ),
+          child: Text(
+            label,
+            style: LiquidTextStyles.caption1.copyWith(
+              color: isSelected
+                  ? LiquidColors.brandDark
+                  : LiquidColors.textSecondary,
+              fontWeight: FontWeight.w600,
+            ),
           ),
         ),
       ),
@@ -496,43 +503,50 @@ class _CalendarGrid extends StatelessWidget {
               final hasArchive =
                   archives.containsKey(DateTime(day.year, day.month, day.day));
 
-              return GestureDetector(
-                onTap: () => onSelectDay(day),
-                child: Container(
-                  decoration: BoxDecoration(
-                    color: isSelected
-                        ? LiquidColors.brand.withValues(alpha: 0.88)
-                        : LiquidColors.glassUltraLight,
-                    borderRadius: BorderRadius.circular(LiquidRadius.xs),
-                    border: Border.all(color: LiquidColors.separatorLight),
-                  ),
-                  child: Center(
-                    child: Column(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        Text(
-                          '${day.day}',
-                          style: TextStyle(
-                            fontSize: 12,
-                            fontWeight: FontWeight.w600,
-                            color: isSelected
-                                ? CupertinoColors.white
-                                : isCurrentMonth
-                                    ? LiquidColors.textPrimary
-                                    : LiquidColors.textSecondary,
-                          ),
-                        ),
-                        if (hasArchive)
-                          Container(
-                            width: 4,
-                            height: 4,
-                            margin: const EdgeInsets.only(top: 2),
-                            decoration: const BoxDecoration(
-                              color: LiquidColors.accent,
-                              shape: BoxShape.circle,
+              return Semantics(
+                button: true,
+                selected: isSelected,
+                label: '$day',
+                child: CupertinoButton(
+                  padding: EdgeInsets.zero,
+                  minimumSize: Size.zero,
+                  onPressed: () => onSelectDay(day),
+                  child: Container(
+                    decoration: BoxDecoration(
+                      color: isSelected
+                          ? LiquidColors.brand.withValues(alpha: 0.88)
+                          : LiquidColors.glassUltraLight,
+                      borderRadius: BorderRadius.circular(LiquidRadius.xs),
+                      border: Border.all(color: LiquidColors.separatorLight),
+                    ),
+                    child: Center(
+                      child: Column(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Text(
+                            '${day.day}',
+                            style: TextStyle(
+                              fontSize: 12,
+                              fontWeight: FontWeight.w600,
+                              color: isSelected
+                                  ? CupertinoColors.white
+                                  : isCurrentMonth
+                                      ? LiquidColors.textPrimary
+                                      : LiquidColors.textSecondary,
                             ),
                           ),
-                      ],
+                          if (hasArchive)
+                            Container(
+                              width: 4,
+                              height: 4,
+                              margin: const EdgeInsets.only(top: 2),
+                              decoration: const BoxDecoration(
+                                color: LiquidColors.accent,
+                                shape: BoxShape.circle,
+                              ),
+                            ),
+                        ],
+                      ),
                     ),
                   ),
                 ),
