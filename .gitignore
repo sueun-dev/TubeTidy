@@ -35,6 +35,9 @@ migrate_working_dir/
 .venv/
 .env
 server/cache/
+# Generated per-folder validation reports are centralized in docs/confirm/.
+**/confirm.md
+!docs/confirm/**
 
 # Symbolication related
 app.*.symbols

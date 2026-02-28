@@ -7,6 +7,8 @@ class AppConfig {
   static const webAutoSignIn =
       String.fromEnvironment('WEB_AUTO_SIGNIN', defaultValue: 'true') !=
           'false';
+  static const e2eTestMode =
+      String.fromEnvironment('E2E_TEST_MODE', defaultValue: 'false') == 'true';
   static const appVersion = String.fromEnvironment('APP_VERSION');
   static const buildNumber = String.fromEnvironment('BUILD_NUMBER');
   static const privacyPolicyUrl = String.fromEnvironment('PRIVACY_POLICY_URL');

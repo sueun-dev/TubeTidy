@@ -286,6 +286,7 @@ class SettingsScreen extends ConsumerWidget {
                         SizedBox(
                           width: double.infinity,
                           child: CupertinoButton(
+                            key: const ValueKey('settings-logout-button'),
                             color: LiquidColors.danger,
                             borderRadius:
                                 BorderRadius.circular(LiquidRadius.sm),

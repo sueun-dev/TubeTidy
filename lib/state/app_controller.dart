@@ -1,5 +1,4 @@
 import 'dart:async';
-import 'dart:collection';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -13,10 +12,13 @@ import '../models/transcript.dart';
 import '../models/user.dart';
 import '../models/video.dart';
 import '../services/app_services.dart';
-import '../services/backend_api.dart';
-import '../services/billing_service.dart';
 import '../services/selection_change_cache.dart';
-import '../services/youtube_api.dart';
+import '../services/user_state_service.dart';
+import 'auth_session_controller.dart';
+import 'channel_sync_controller.dart';
+import 'plan_billing_controller.dart';
+import 'selection_policy.dart';
+import 'transcript_queue_controller.dart';
 
 @immutable
 class AppStateData {
@@ -198,14 +200,26 @@ class AppController extends StateNotifier<AppStateData> {
 
   final AppServices _services;
   final GoogleSignIn _googleSignIn;
-  Future<BillingService?>? _billingService;
-  Map<String, String>? _authHeaders;
-  GoogleSignInAccount? _googleAccount;
+  final AuthSessionController _authSession = AuthSessionController();
+  late final ChannelSyncController _channelSync = ChannelSyncController(
+    selectionService: _services.selectionService,
+    youtubeApiFactory: _services.youtubeApiFactory,
+  );
+  late final PlanBillingController _planBilling = PlanBillingController(
+    gatewayFactory: () async {
+      final service = await _services.billingServiceFactory();
+      if (service == null) return null;
+      return BillingServiceGateway(service);
+    },
+    isIapSupportedPlatform:
+        !kIsWeb && defaultTargetPlatform == TargetPlatform.iOS,
+    iosPlusProductId: AppConfig.iosPlusProductId,
+    iosProProductId: AppConfig.iosProProductId,
+    iosUnlimitedProductId: AppConfig.iosUnlimitedProductId,
+  );
+  final TranscriptQueueController _transcriptQueueController =
+      TranscriptQueueController();
   late final StreamSubscription<GoogleSignInAccount?> _accountSubscription;
-  Queue<Video> _transcriptQueue = Queue<Video>();
-  bool _isProcessingQueue = false;
-  bool _pendingQueueRestart = false;
-  int _queueGeneration = 0;
   DateTime? _lastRefreshAt;
   static const _refreshCooldown = Duration(seconds: 10);
   static const List<String> _youtubeScopes = <String>[
@@ -215,9 +229,27 @@ class AppController extends StateNotifier<AppStateData> {
   static const Duration _scopeRequestTimeout = Duration(seconds: 20);
   static const Duration _authHeadersTimeout = Duration(seconds: 12);
   static const Duration _initialSyncTimeout = Duration(seconds: 25);
+  static const String _e2eUserId = 'e2e_user_0001';
+  static const String _e2eUserEmail = 'e2e-user@example.com';
   bool _isRestoringSession = false;
 
   DateTime _now() => _services.now();
+  bool _isAuthFlowCurrent(int revision) =>
+      mounted && _authSession.isFlowCurrent(revision);
+  bool _isCurrentAccountId(String accountId) =>
+      _authSession.matchesAccountId(accountId);
+
+  void _clearAuthSession() {
+    _authSession.clearSession();
+  }
+
+  Map<String, String> _currentAuthHeaders() {
+    final headers = _authSession.authHeaders;
+    if (headers == null) {
+      throw Exception('로그인 상태가 변경되었습니다. 다시 시도해주세요.');
+    }
+    return headers;
+  }
 
   bool canSelectMore() {
     final limit = state.channelLimit;
@@ -249,10 +281,25 @@ class AppController extends StateNotifier<AppStateData> {
     _setLoading(false);
   }
 
+  Future<void> signInForE2E() async {
+    if (!AppConfig.e2eTestMode) {
+      return;
+    }
+    _setLoading(true);
+    try {
+      await _bootstrapE2EUserSession();
+    } catch (error) {
+      _setToast(
+        kDebugMode ? 'E2E 로그인 실패: $error' : '테스트 로그인에 실패했습니다.',
+      );
+    }
+    _setLoading(false);
+  }
+
   Future<void> connectYouTubeAccount() async {
     _setLoading(true);
     try {
-      if (_googleAccount == null) {
+      if (_authSession.account == null) {
         await signInWithGoogle();
       } else {
         await _connectAndSyncYouTube(allowInteractive: true);
@@ -300,90 +347,72 @@ class AppController extends StateNotifier<AppStateData> {
   }
 
   void toggleChannel(String channelId) {
-    final selected = Set<String>.from(state.selectedChannelIds);
-    final limit = state.channelLimit;
-    final isSelected = selected.contains(channelId);
-    final isCompleted = state.selectionCompleted;
-    final isSwapPending = state.selectionChangePending;
-    final hasFreeSlots = limit > 0 && selected.length < limit;
-    final swapCompleted =
-        state.dailySwapAddedId != null && state.dailySwapRemovedId != null;
-
-    if (isCompleted && !isSelected && !isSwapPending && hasFreeSlots) {
-      selected.add(channelId);
-      state = state.copyWith(selectedChannelIds: Set.unmodifiable(selected));
-      return;
+    var canChangeSelectionToday = true;
+    if (state.selectionCompleted && !state.selectionChangePending) {
+      canChangeSelectionToday = _canChangeSelectionToday();
     }
-
-    if (isCompleted && !isSwapPending && !_canChangeSelectionToday()) {
-      _setToast('오늘은 채널 변경을 이미 1회 사용했습니다. 내일 다시 변경할 수 있어요.');
-      return;
-    }
-
-    if (isCompleted && swapCompleted) {
-      _setToast('오늘은 1개 교체만 가능합니다. 변경을 저장하려면 완료를 눌러주세요.');
-      return;
-    }
-
-    if (isSelected) {
-      if (isCompleted && !_canRemoveChannel(channelId, selected)) {
-        _setToast('오늘은 채널 1개만 교체할 수 있습니다. 추가/제거를 더 진행할 수 없어요.');
-        return;
-      }
-      selected.remove(channelId);
-      state = state.copyWith(
-        selectedChannelIds: Set.unmodifiable(selected),
-        selectionChangePending:
-            isCompleted ? true : state.selectionChangePending,
-        dailySwapRemovedId:
-            isCompleted ? (state.dailySwapRemovedId ?? channelId) : null,
-      );
-      return;
-    }
-
-    if (!canSelectMore()) {
-      _setToast('채널 한도가 가득 찼습니다. 다른 채널을 하나 해제한 뒤 추가해주세요.');
-      return;
-    }
-
-    if (isCompleted && !_canAddChannel(channelId)) {
-      _setToast('오늘은 채널 1개만 교체할 수 있습니다. 추가/제거를 더 진행할 수 없어요.');
-      return;
-    }
-
-    selected.add(channelId);
-    state = state.copyWith(
-      selectedChannelIds: Set.unmodifiable(selected),
-      selectionChangePending: isCompleted ? true : state.selectionChangePending,
-      dailySwapAddedId:
-          isCompleted ? (state.dailySwapAddedId ?? channelId) : null,
+    final outcome = SelectionPolicy.toggle(
+      SelectionPolicyInput(
+        channelId: channelId,
+        selectedChannelIds: state.selectedChannelIds,
+        channelLimit: state.channelLimit,
+        selectionCompleted: state.selectionCompleted,
+        selectionChangePending: state.selectionChangePending,
+        dailySwapAddedId: state.dailySwapAddedId,
+        dailySwapRemovedId: state.dailySwapRemovedId,
+        canChangeSelectionToday: canChangeSelectionToday,
+      ),
     );
+    if (outcome.toastMessage != null) {
+      _setToast(outcome.toastMessage!);
+    }
+    if (!outcome.changed) {
+      return;
+    }
+    state = state.copyWith(
+      selectedChannelIds: outcome.selectedChannelIds,
+      selectionChangePending: outcome.selectionChangePending,
+      dailySwapAddedId: outcome.dailySwapAddedId,
+      dailySwapRemovedId: outcome.dailySwapRemovedId,
+    );
+  }
+
+  bool _validatePendingSwapSelection() {
+    final result = SelectionPolicy.validatePendingSwap(
+      selectionCompleted: state.selectionCompleted,
+      selectionChangePending: state.selectionChangePending,
+      dailySwapAddedId: state.dailySwapAddedId,
+      dailySwapRemovedId: state.dailySwapRemovedId,
+    );
+    if (result.toastMessage != null) {
+      _setToast(result.toastMessage!);
+    }
+    return result.isValid;
   }
 
   void clearToast() {
     state = state.copyWith(toastMessage: null);
   }
 
-  Future<void> finalizeChannelSelection() async {
+  Future<bool> finalizeChannelSelection() async {
+    if (state.isLoading) {
+      return false;
+    }
     _setLoading(true);
     try {
-      if (state.selectionCompleted && state.selectionChangePending) {
-        if (state.dailySwapAddedId == null ||
-            state.dailySwapRemovedId == null) {
-          _setToast('채널 변경은 1개 교체(제거 1 + 추가 1)로 완료됩니다.');
-          _setLoading(false);
-          return;
-        }
+      if (!_validatePendingSwapSelection()) {
+        return false;
       }
       await _loadSelectedVideos(allowInteractive: true);
       final shouldConsumeChange =
           state.selectionCompleted && state.selectionChangePending;
-      if (shouldConsumeChange) {
-        _recordSelectionChange();
-      }
       final saved = await _persistSelectionToServer();
       if (!saved) {
-        throw Exception('채널 선택 저장에 실패했습니다.');
+        _setToast('채널 선택을 저장하지 못했습니다. 다시 시도해주세요.');
+        return false;
+      }
+      if (shouldConsumeChange) {
+        await _recordSelectionChange();
       }
       state = state.copyWith(
         selectionCompleted: true,
@@ -391,10 +420,13 @@ class AppController extends StateNotifier<AppStateData> {
         dailySwapAddedId: null,
         dailySwapRemovedId: null,
       );
+      return true;
     } catch (error) {
       _setToast(kDebugMode ? '영상 로드 실패: $error' : '선택한 채널의 영상을 불러오지 못했습니다.');
+      return false;
+    } finally {
+      _setLoading(false);
     }
-    _setLoading(false);
   }
 
   Future<void> toggleArchive(String videoId) async {
@@ -479,10 +511,10 @@ class AppController extends StateNotifier<AppStateData> {
   }
 
   void signOut() {
-    _googleSignIn.signOut();
-    _authHeaders = null;
-    _googleAccount = null;
-    BackendApi.setIdToken(null);
+    _authSession.invalidateFlow();
+    _isRestoringSession = false;
+    unawaited(_googleSignIn.signOut().catchError((_) => null));
+    _clearAuthSession();
     state = AppStateData.initial();
   }
 
@@ -492,110 +524,33 @@ class AppController extends StateNotifier<AppStateData> {
     super.dispose();
   }
 
-  Future<BillingService?> _getBillingService() async {
-    if (kIsWeb || defaultTargetPlatform != TargetPlatform.iOS) {
-      return null;
-    }
-    _billingService ??= _services.billingServiceFactory();
-    return _billingService!;
-  }
-
-  String _productIdForTier(PlanTier tier) {
-    switch (tier) {
-      case PlanTier.starter:
-        return AppConfig.iosPlusProductId;
-      case PlanTier.growth:
-        return AppConfig.iosProProductId;
-      case PlanTier.unlimited:
-        return AppConfig.iosUnlimitedProductId;
-      case PlanTier.free:
-      case PlanTier.lifetime:
-        return '';
-    }
-  }
-
-  static const String purchaseMissingProductId = 'iap_missing_product_id';
-  static const String purchaseUnavailable = 'iap_unavailable';
-  static const String purchaseFailed = 'iap_failed';
-  static const String restoreUnavailable = 'iap_restore_unavailable';
-  static const String restoreNone = 'iap_restore_none';
-  static const String restoreNotFound = 'iap_restore_not_found';
+  static const String purchaseMissingProductId =
+      PlanBillingController.purchaseMissingProductId;
+  static const String purchaseUnavailable =
+      PlanBillingController.purchaseUnavailable;
+  static const String purchaseFailed = PlanBillingController.purchaseFailed;
+  static const String restoreUnavailable =
+      PlanBillingController.restoreUnavailable;
+  static const String restoreNone = PlanBillingController.restoreNone;
+  static const String restoreNotFound = PlanBillingController.restoreNotFound;
 
   Future<String?> purchasePlan(PlanTier tier) async {
-    if (tier == PlanTier.free) {
-      upgradePlan(tier);
-      return null;
-    }
-
-    if (kIsWeb || defaultTargetPlatform != TargetPlatform.iOS) {
-      return purchaseUnavailable;
-    }
-
-    final productId = _productIdForTier(tier);
-    if (productId.isEmpty) {
-      return purchaseMissingProductId;
-    }
-
-    final billing = await _getBillingService();
-    if (billing == null || !(await billing.isAvailable())) {
-      return purchaseUnavailable;
-    }
-
-    final purchase = await billing.purchase(productId);
-    if (purchase == null) {
-      return purchaseFailed;
-    }
-
-    upgradePlan(tier);
-    await _persistPlan(tier);
-    return null;
+    return _planBilling.purchasePlan(
+      tier: tier,
+      onActivateLocalPlan: (resolvedTier) async {
+        upgradePlan(resolvedTier);
+      },
+      onPersistPlan: _persistPlan,
+    );
   }
 
   Future<String?> restorePurchases() async {
-    if (kIsWeb || defaultTargetPlatform != TargetPlatform.iOS) {
-      return restoreUnavailable;
-    }
-    final billing = await _getBillingService();
-    if (billing == null || !(await billing.isAvailable())) {
-      return restoreUnavailable;
-    }
-    final purchases = await billing.restore();
-    if (purchases.isEmpty) {
-      return restoreNone;
-    }
-
-    final restoredTier = _resolveTierFromPurchases(purchases);
-    if (restoredTier == null) {
-      return restoreNotFound;
-    }
-    upgradePlan(restoredTier);
-    await _persistPlan(restoredTier);
-    return null;
-  }
-
-  PlanTier? _resolveTierFromPurchases(List<dynamic> purchases) {
-    final ids = purchases
-        .map((p) {
-          if (p is String) return p;
-          try {
-            return (p as dynamic).productID as String?;
-          } catch (_) {
-            return null;
-          }
-        })
-        .whereType<String>()
-        .toSet();
-
-    if (ids.contains(AppConfig.iosUnlimitedProductId)) {
-      return PlanTier.unlimited;
-    }
-    if (ids.contains(AppConfig.iosProProductId)) {
-      return PlanTier.growth;
-    }
-    if (ids.contains(AppConfig.iosPlusProductId)) {
-      return PlanTier.starter;
-    }
-    return null;
+    return _planBilling.restorePurchases(
+      onActivateLocalPlan: (resolvedTier) async {
+        upgradePlan(resolvedTier);
+      },
+      onPersistPlan: _persistPlan,
+    );
   }
 
   Future<void> _persistPlan(PlanTier tier) async {
@@ -743,21 +698,10 @@ class AppController extends StateNotifier<AppStateData> {
     }
   }
 
-  Set<String> _normalizeSelection(List<Channel> channels) {
-    if (channels.isEmpty || state.selectedChannelIds.isEmpty) {
-      return state.selectedChannelIds;
-    }
-    final available = channels.map((channel) => channel.id).toSet();
-    final filtered =
-        state.selectedChannelIds.where(available.contains).toList();
-    final limit = state.channelLimit;
-    if (limit <= 0) return <String>{};
-    return filtered.take(limit).toSet();
-  }
-
   int _dayKey(DateTime date) => date.year * 10000 + date.month * 100 + date.day;
 
-  Future<void> _loadSelectionChangeState() async {
+  Future<void> _loadSelectionChangeState(
+      {UserStatePayload? remoteState}) async {
     final userId = state.user?.id;
     if (userId == null) return;
     SelectionChangeState? localData;
@@ -768,7 +712,8 @@ class AppController extends StateNotifier<AppStateData> {
       localData = null;
     }
 
-    final remote = await _services.userStateService.fetchState(userId);
+    final remote =
+        remoteState ?? await _services.userStateService.fetchState(userId);
     if (remote != null) {
       var mergedDay = remote.selectionChangeDay;
       var mergedCount = remote.selectionChangesToday;
@@ -829,7 +774,7 @@ class AppController extends StateNotifier<AppStateData> {
     );
   }
 
-  Future<void> _loadVideoHistoryState() async {
+  Future<void> _loadVideoHistoryState({UserStatePayload? remoteState}) async {
     final userId = state.user?.id;
     if (userId == null) return;
     Set<String> localIds = <String>{};
@@ -840,7 +785,8 @@ class AppController extends StateNotifier<AppStateData> {
       localIds = <String>{};
     }
 
-    final remote = await _services.userStateService.fetchState(userId);
+    final remote =
+        remoteState ?? await _services.userStateService.fetchState(userId);
     if (remote != null) {
       final merged = <String>{...remote.openedVideoIds, ...localIds};
       state = state.copyWith(
@@ -884,33 +830,14 @@ class AppController extends StateNotifier<AppStateData> {
     return state.selectionChangesToday < 1;
   }
 
-  bool _canAddChannel(String channelId) {
-    if (!state.selectionCompleted) return true;
-    if (!state.selectionChangePending) return true;
-    final added = state.dailySwapAddedId;
-    return added == null || added == channelId;
-  }
-
-  bool _canRemoveChannel(String channelId, Set<String> selected) {
-    if (!state.selectionCompleted) return true;
-    if (!state.selectionChangePending) {
-      return selected.length > 1;
-    }
-    final removed = state.dailySwapRemovedId;
-    if (removed == null || removed == channelId) {
-      return true;
-    }
-    return false;
-  }
-
-  void _recordSelectionChange() {
+  Future<void> _recordSelectionChange() async {
     final todayKey = _dayKey(_now());
     final count = state.selectionChangeDay == todayKey
         ? state.selectionChangesToday + 1
         : 1;
     state = state.copyWith(
         selectionChangeDay: todayKey, selectionChangesToday: count);
-    _persistSelectionChange(todayKey, count);
+    await _persistSelectionChange(todayKey, count);
   }
 
   void _resetSelectionChange(int todayKey) {
@@ -921,10 +848,11 @@ class AppController extends StateNotifier<AppStateData> {
       dailySwapRemovedId: null,
       selectionChangePending: false,
     );
-    _persistSelectionChange(todayKey, 0);
+    unawaited(_persistSelectionChange(todayKey, 0));
   }
 
   Future<void> _persistSelectionChange(int dayKey, int count) async {
+    if (!mounted) return;
     final userId = state.user?.id;
     if (userId == null) return;
     try {
@@ -942,6 +870,19 @@ class AppController extends StateNotifier<AppStateData> {
 
   Future<void> _restoreSession() async {
     if (state.isSignedIn) return;
+    if (AppConfig.e2eTestMode) {
+      if (!AppConfig.webAutoSignIn) {
+        return;
+      }
+      _setLoading(true);
+      try {
+        await _bootstrapE2EUserSession();
+      } catch (_) {
+        // Ignore e2e session restore failures.
+      }
+      _setLoading(false);
+      return;
+    }
     if (kIsWeb && !AppConfig.webAutoSignIn) {
       return;
     }
@@ -966,6 +907,98 @@ class AppController extends StateNotifier<AppStateData> {
     _setLoading(false);
   }
 
+  Future<void> _bootstrapE2EUserSession() async {
+    final now = _now();
+    final channels = _e2eChannels();
+    state = state.copyWith(
+      user: User(
+        id: _e2eUserId,
+        email: _e2eUserEmail,
+        plan: const Plan(tier: PlanTier.free),
+        createdAt: now,
+      ),
+      youtubeConnected: true,
+      selectionCompleted: false,
+      channels: List.unmodifiable(channels),
+      selectedChannelIds: const <String>{},
+      videos: const <Video>[],
+      transcripts: const <String, TranscriptResult>{},
+      transcriptLoading: const <String>{},
+      transcriptQueued: const <String>{},
+    );
+    final remoteState = await _fetchRemoteUserState(_e2eUserId);
+    await Future.wait([
+      _syncUserProfile(),
+      _loadVideoHistoryState(remoteState: remoteState),
+      _loadSelectionChangeState(remoteState: remoteState),
+      _loadArchivesFromServer(),
+    ]);
+    await _loadSelectionFromServer();
+    if (state.selectionCompleted) {
+      await _loadSelectedVideos();
+    }
+  }
+
+  List<Channel> _e2eChannels() {
+    return <Channel>[
+      Channel(
+        id: 'e2echannel01',
+        youtubeChannelId: 'e2echannel01',
+        title: 'E2E 채널 1',
+        thumbnailUrl: '',
+      ),
+      Channel(
+        id: 'e2echannel02',
+        youtubeChannelId: 'e2echannel02',
+        title: 'E2E 채널 2',
+        thumbnailUrl: '',
+      ),
+      Channel(
+        id: 'e2echannel03',
+        youtubeChannelId: 'e2echannel03',
+        title: 'E2E 채널 3',
+        thumbnailUrl: '',
+      ),
+      Channel(
+        id: 'e2echannel04',
+        youtubeChannelId: 'e2echannel04',
+        title: 'E2E 채널 4',
+        thumbnailUrl: '',
+      ),
+    ];
+  }
+
+  List<Video> _e2eVideos(Set<String> selectedChannelIds) {
+    final channelsById = {
+      for (final channel in state.channels) channel.id: channel
+    };
+    final now = _now();
+    final sortedChannelIds = selectedChannelIds.toList()..sort();
+    final videos = <Video>[];
+    var rank = 0;
+    for (final channelId in sortedChannelIds) {
+      final channelTitle = channelsById[channelId]?.title ?? channelId;
+      for (var index = 0; index < 2; index += 1) {
+        final offsetHours = rank * 3 + index;
+        final publishedAt = now.subtract(Duration(hours: offsetHours));
+        final videoId = 'e2evideo_${channelId}_${index + 1}';
+        videos.add(
+          Video(
+            id: videoId,
+            youtubeId: videoId,
+            channelId: channelId,
+            title: '$channelTitle 요약 영상 ${index + 1}',
+            publishedAt: publishedAt,
+            thumbnailUrl: '',
+          ),
+        );
+      }
+      rank += 1;
+    }
+    videos.sort((a, b) => b.publishedAt.compareTo(a.publishedAt));
+    return videos;
+  }
+
   Future<void> _primeGoogleSignInForWeb() async {
     try {
       await _googleSignIn.isSignedIn();
@@ -976,17 +1009,26 @@ class AppController extends StateNotifier<AppStateData> {
 
   void _handleAccountChange(GoogleSignInAccount? account) {
     if (account == null) return;
-    if (_googleAccount?.id == account.id && _authHeaders != null) {
-      unawaited(_refreshBackendAuthToken(account));
+    if (_authSession.matchesAccountId(account.id) &&
+        _authSession.hasAuthHeaders) {
+      unawaited(
+        _authSession.refreshBackendToken(
+          account: account,
+          expectedAccountId: account.id,
+          expectedAuthRevision: _authSession.revision,
+        ),
+      );
       return;
     }
     // On web, requesting extra OAuth scopes from this async callback can be
     // blocked as a popup by browsers. Ask scopes from explicit user actions
     // (e.g., refresh button) instead.
     final allowInteractiveScopes = !_isRestoringSession && !kIsWeb;
-    _processSignedInAccount(
-      account,
-      allowInteractive: allowInteractiveScopes,
+    unawaited(
+      _processSignedInAccount(
+        account,
+        allowInteractive: allowInteractiveScopes,
+      ),
     );
   }
 
@@ -995,11 +1037,23 @@ class AppController extends StateNotifier<AppStateData> {
     bool showErrors = true,
     bool allowInteractive = false,
   }) async {
+    final authRevision = _authSession.beginFlow();
     _setLoading(true);
     try {
-      _googleAccount = account;
-      _authHeaders = await account.authHeaders;
-      await _refreshBackendAuthToken(account);
+      final headers = await account.authHeaders.timeout(_authHeadersTimeout);
+      if (!_isAuthFlowCurrent(authRevision)) {
+        return;
+      }
+      _authSession.setAccount(account);
+      _authSession.setAuthHeaders(headers);
+      await _authSession.refreshBackendToken(
+        account: account,
+        expectedAccountId: account.id,
+        expectedAuthRevision: authRevision,
+      );
+      if (!_isAuthFlowCurrent(authRevision)) {
+        return;
+      }
       state = state.copyWith(
         user: User(
           id: account.id,
@@ -1008,49 +1062,74 @@ class AppController extends StateNotifier<AppStateData> {
           createdAt: _now(),
         ),
       );
-      await Future.wait([_syncUserProfile(), _loadVideoHistoryState()]);
+      final remoteState = await _fetchRemoteUserState(account.id);
+      if (!_isAuthFlowCurrent(authRevision)) {
+        return;
+      }
+      await Future.wait([
+        _syncUserProfile(),
+        _loadVideoHistoryState(remoteState: remoteState),
+      ]);
+      if (!_isAuthFlowCurrent(authRevision)) {
+        return;
+      }
       try {
         await Future.wait([
-          _connectAndSyncYouTube(allowInteractive: allowInteractive),
+          _connectAndSyncYouTube(
+            allowInteractive: allowInteractive,
+            remoteState: remoteState,
+          ),
           _loadArchivesFromServer(),
         ]).timeout(_initialSyncTimeout);
       } on TimeoutException {
-        if (showErrors) {
+        if (showErrors && _isAuthFlowCurrent(authRevision)) {
           _setToast('동기화 시간이 초과되었습니다. 새로고침 후 다시 시도해주세요.');
         }
       } catch (error) {
-        if (showErrors) {
+        if (showErrors && _isAuthFlowCurrent(authRevision)) {
           _setToast(kDebugMode
               ? 'YouTube 동기화 실패: $error'
               : 'YouTube 구독 채널을 불러오지 못했습니다.');
         }
       }
+    } on TimeoutException {
+      if (showErrors && _isAuthFlowCurrent(authRevision)) {
+        _setToast(
+          'Google 인증 토큰을 가져오지 못했습니다. '
+          '다시 로그인하거나 새로고침 후 재시도해주세요.',
+        );
+      }
     } catch (error) {
-      if (showErrors) {
+      if (showErrors && _isAuthFlowCurrent(authRevision)) {
         _setToast(kDebugMode
             ? 'Google 로그인 실패: $error'
             : 'Google 로그인에 실패했습니다. 다시 시도해주세요.');
       }
+    } finally {
+      if (_isAuthFlowCurrent(authRevision)) {
+        _setLoading(false);
+      }
     }
-    _setLoading(false);
   }
 
-  Future<void> _refreshBackendAuthToken(GoogleSignInAccount account) async {
+  Future<UserStatePayload?> _fetchRemoteUserState(String userId) async {
     try {
-      final authentication = await account.authentication;
-      BackendApi.setIdToken(authentication.idToken);
+      return await _services.userStateService.fetchState(userId);
     } catch (_) {
-      BackendApi.setIdToken(null);
+      return null;
     }
   }
 
-  Future<void> _connectAndSyncYouTube({bool allowInteractive = false}) async {
-    if (_googleAccount == null) {
+  Future<void> _connectAndSyncYouTube({
+    bool allowInteractive = false,
+    UserStatePayload? remoteState,
+  }) async {
+    if (_authSession.account == null) {
       throw Exception('로그인이 필요합니다.');
     }
     state = state.copyWith(selectionCompleted: false);
     try {
-      await _loadSelectionChangeState();
+      await _loadSelectionChangeState(remoteState: remoteState);
       await _loadChannels(allowInteractive: allowInteractive);
       state = state.copyWith(youtubeConnected: true);
       await _loadSelectionFromServer();
@@ -1071,25 +1150,16 @@ class AppController extends StateNotifier<AppStateData> {
   }
 
   Future<void> _loadChannels({bool allowInteractive = false}) async {
-    await _ensureYouTubeAccess(allowInteractive: allowInteractive);
-    final api = _services.youtubeApiFactory(_authHeaders!);
-    List<Channel> channels;
-    try {
-      channels = await api.fetchSubscriptions();
-    } on YouTubeApiException catch (error) {
-      if (_shouldRetryAuth(error.statusCode) && allowInteractive) {
-        await _ensureYouTubeAccess(
-          allowInteractive: allowInteractive,
-          forceRefresh: true,
-        );
-        channels = await _services
-            .youtubeApiFactory(_authHeaders!)
-            .fetchSubscriptions();
-      } else {
-        rethrow;
-      }
-    }
-    final normalized = _normalizeSelection(channels);
+    final channels = await _channelSync.fetchChannels(
+      allowInteractive: allowInteractive,
+      ensureYouTubeAccess: _ensureYouTubeAccess,
+      currentAuthHeaders: _currentAuthHeaders,
+    );
+    final normalized = _channelSync.normalizeSelection(
+      channels: channels,
+      selectedChannelIds: state.selectedChannelIds,
+      channelLimit: state.channelLimit,
+    );
     state = state.copyWith(
       channels: List.unmodifiable(channels),
       selectedChannelIds: Set.unmodifiable(normalized),
@@ -1099,7 +1169,7 @@ class AppController extends StateNotifier<AppStateData> {
   Future<void> _loadSelectionFromServer() async {
     final userId = state.user?.id;
     if (userId == null) return;
-    final selected = await _services.selectionService.fetchSelection(userId);
+    final selected = await _channelSync.fetchSelection(userId);
     if (selected == null) return;
     if (selected.isEmpty) {
       state = state.copyWith(
@@ -1108,8 +1178,11 @@ class AppController extends StateNotifier<AppStateData> {
       );
       return;
     }
-    final available = state.channels.map((channel) => channel.id).toSet();
-    final filtered = selected.where(available.contains).toSet();
+    final filtered = _channelSync.filterServerSelection(
+      selected: selected,
+      channels: state.channels,
+      channelLimit: state.channelLimit,
+    );
     if (filtered.isEmpty) {
       state = state.copyWith(
         selectedChannelIds: const <String>{},
@@ -1117,10 +1190,8 @@ class AppController extends StateNotifier<AppStateData> {
       );
       return;
     }
-    final limit = state.channelLimit;
-    final limited = limit > 0 ? filtered.take(limit).toSet() : filtered;
     state = state.copyWith(
-      selectedChannelIds: Set.unmodifiable(limited),
+      selectedChannelIds: Set.unmodifiable(filtered),
       selectionCompleted: true,
     );
     _loadSelectedVideosSilently();
@@ -1129,7 +1200,7 @@ class AppController extends StateNotifier<AppStateData> {
   Future<bool> _persistSelectionToServer() async {
     final userId = state.user?.id;
     if (userId == null) return false;
-    return _services.selectionService.saveSelection(
+    return _channelSync.saveSelection(
       userId: userId,
       channels: state.channels,
       selectedIds: state.selectedChannelIds,
@@ -1141,6 +1212,7 @@ class AppController extends StateNotifier<AppStateData> {
     int? selectionChangesToday,
     Set<String>? openedVideoIds,
   }) async {
+    if (!mounted) return false;
     final userId = state.user?.id;
     if (userId == null) return false;
     return _services.userStateService.saveState(
@@ -1155,37 +1227,34 @@ class AppController extends StateNotifier<AppStateData> {
 
   Future<void> _loadSelectedVideos({bool allowInteractive = false}) async {
     if (state.selectedChannelIds.isEmpty) return;
-    await _ensureYouTubeAccess(allowInteractive: allowInteractive);
-    final api = _services.youtubeApiFactory(_authHeaders!);
-    List<Video> videos;
-    try {
-      videos = await api.fetchLatestVideos(state.selectedChannelIds.toList());
-    } on YouTubeApiException catch (error) {
-      if (_shouldRetryAuth(error.statusCode) && allowInteractive) {
-        await _ensureYouTubeAccess(
-          allowInteractive: allowInteractive,
-          forceRefresh: true,
-        );
-        videos = await _services
-            .youtubeApiFactory(_authHeaders!)
-            .fetchLatestVideos(state.selectedChannelIds.toList());
-      } else {
-        rethrow;
-      }
+    if (AppConfig.e2eTestMode) {
+      final videos = _e2eVideos(state.selectedChannelIds);
+      state = state.copyWith(
+        videos: List.unmodifiable(videos),
+        transcripts: const <String, TranscriptResult>{},
+        transcriptLoading: const <String>{},
+        transcriptQueued: const <String>{},
+      );
+      _transcriptQueueController.reset();
+      return;
     }
+    final videos = await _channelSync.fetchLatestVideos(
+      selectedChannelIds: state.selectedChannelIds.toList(),
+      allowInteractive: allowInteractive,
+      ensureYouTubeAccess: _ensureYouTubeAccess,
+      currentAuthHeaders: _currentAuthHeaders,
+    );
     state = state.copyWith(
       videos: List.unmodifiable(videos),
       transcripts: const <String, TranscriptResult>{},
       transcriptLoading: const <String>{},
       transcriptQueued: const <String>{},
     );
-    _queueGeneration += 1;
-    _transcriptQueue = Queue<Video>();
-    _pendingQueueRestart = false;
+    _transcriptQueueController.reset();
   }
 
   void _loadSelectedVideosSilently() {
-    if (_googleAccount == null || state.selectedChannelIds.isEmpty) {
+    if (_authSession.account == null || state.selectedChannelIds.isEmpty) {
       return;
     }
     unawaited(_loadSelectedVideos().catchError((_) {
@@ -1193,14 +1262,12 @@ class AppController extends StateNotifier<AppStateData> {
     }));
   }
 
-  bool _shouldRetryAuth(int statusCode) =>
-      statusCode == 401 || statusCode == 403;
-
   Future<void> _ensureYouTubeAccess({
     required bool allowInteractive,
     bool forceRefresh = false,
   }) async {
-    if (_googleAccount == null) {
+    final account = _authSession.account;
+    if (account == null) {
       throw Exception('로그인이 필요합니다.');
     }
     if (kIsWeb) {
@@ -1245,35 +1312,21 @@ class AppController extends StateNotifier<AppStateData> {
       }
     }
     try {
-      _authHeaders =
-          await _googleAccount!.authHeaders.timeout(_authHeadersTimeout);
+      final headers = await account.authHeaders.timeout(_authHeadersTimeout);
+      if (!_isCurrentAccountId(account.id)) {
+        throw Exception('로그인 상태가 변경되었습니다. 다시 시도해주세요.');
+      }
+      _authSession.setAuthHeaders(headers);
     } on TimeoutException {
       throw Exception(
         'Google 인증 토큰을 가져오지 못했습니다. '
         '다시 로그인하거나 새로고침 후 재시도해주세요.',
       );
     }
-    await _refreshBackendAuthToken(_googleAccount!);
-  }
-
-  Future<void> _processTranscriptQueue(int generation) async {
-    if (_isProcessingQueue) return;
-    _isProcessingQueue = true;
-
-    while (_transcriptQueue.isNotEmpty && generation == _queueGeneration) {
-      final video = _transcriptQueue.removeFirst();
-      try {
-        await _fetchTranscriptFor(video);
-      } catch (error) {
-        _handleTranscriptFailure(video, error);
-      }
-    }
-
-    _isProcessingQueue = false;
-    if (_pendingQueueRestart) {
-      _pendingQueueRestart = false;
-      _processTranscriptQueue(_queueGeneration);
-    }
+    await _authSession.refreshBackendToken(
+      account: account,
+      expectedAccountId: account.id,
+    );
   }
 
   void requestSummaryFor(Video video) {
@@ -1290,18 +1343,22 @@ class AppController extends StateNotifier<AppStateData> {
     if (state.transcriptQueued.contains(video.id)) {
       return;
     }
-    if (_transcriptQueue.any((queued) => queued.id == video.id)) {
+    if (_transcriptQueueController.containsVideoId(video.id)) {
       return;
     }
 
-    _transcriptQueue.addLast(video);
-    final queued = Set<String>.from(state.transcriptQueued)..add(video.id);
-    state = state.copyWith(transcriptQueued: Set.unmodifiable(queued));
-    if (_isProcessingQueue) {
-      _pendingQueueRestart = true;
+    final enqueued = _transcriptQueueController.enqueue(video);
+    if (!enqueued) {
       return;
     }
-    _processTranscriptQueue(_queueGeneration);
+    final queued = Set<String>.from(state.transcriptQueued)..add(video.id);
+    state = state.copyWith(transcriptQueued: Set.unmodifiable(queued));
+    unawaited(
+      _transcriptQueueController.processQueue(
+        runTask: _fetchTranscriptFor,
+        onError: _handleTranscriptFailure,
+      ),
+    );
   }
 
   Future<void> _fetchTranscriptFor(Video video) async {

@@ -92,6 +92,7 @@ class ChannelTile extends StatelessWidget {
               label: strings.channelSelectSemantics(channel.title),
               toggled: isSelected,
               child: CupertinoSwitch(
+                key: ValueKey('channel-switch-${channel.id}'),
                 value: isSelected,
                 onChanged: isDisabled ? null : onChanged,
                 activeTrackColor: LiquidColors.brand,

@@ -13,13 +13,18 @@ import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 import requests
+import jwt
 from dotenv import load_dotenv
 from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
+try:
+    from sqlalchemy.dialects.postgresql import insert as pg_insert
+except Exception:  # pragma: no cover - fallback for non-Postgres builds.
+    pg_insert = None
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from yt_dlp import YoutubeDL
 from yt_dlp.utils import DownloadError
@@ -38,6 +43,14 @@ from .models import (
 ROOT = Path(__file__).resolve().parents[1]
 load_dotenv(ROOT / '.env')
 
+
+def _env_flag(name: str, default: bool) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in {'1', 'true', 'yes', 'on'}
+
+
 OPENAI_API_KEY = os.getenv('OPENAI_API_KEY')
 OPENAI_SUMMARY_MODEL = os.getenv('OPENAI_SUMMARY_MODEL', 'gpt-4o-mini')
 OPENAI_SUMMARY_INPUT_CHARS = int(
@@ -49,6 +62,11 @@ YTDLP_COOKIES_FROM_BROWSER = os.getenv('YTDLP_COOKIES_FROM_BROWSER')
 YTDLP_PLAYER_CLIENTS = os.getenv(
     'YTDLP_PLAYER_CLIENTS',
     'android,web,ios,tv,web_embedded',
+)
+YTDLP_PLAYER_CLIENT_LIST = tuple(
+    client.strip()
+    for client in YTDLP_PLAYER_CLIENTS.split(',')
+    if client.strip()
 )
 TRANSCRIPT_CACHE_TTL = int(os.getenv('TRANSCRIPT_CACHE_TTL', '86400'))
 TRANSCRIPT_MAX_CONCURRENCY = int(os.getenv('TRANSCRIPT_MAX_CONCURRENCY', '2'))
@@ -78,20 +96,30 @@ ALLOWED_ORIGINS = tuple(
     if origin.strip()
 )
 ALLOW_CREDENTIALS = '*' not in ALLOWED_ORIGINS
-BACKEND_REQUIRE_AUTH = os.getenv(
-    'BACKEND_REQUIRE_AUTH', 'true'
-).strip().lower() not in {'0', 'false', 'no'}
-ENABLE_API_DOCS = os.getenv(
-    'ENABLE_API_DOCS', 'false'
-).strip().lower() in {'1', 'true', 'yes'}
+APP_ENV = os.getenv('APP_ENV', 'development').strip().lower()
+BACKEND_REQUIRE_AUTH = _env_flag('BACKEND_REQUIRE_AUTH', True)
+ENABLE_API_DOCS = _env_flag('ENABLE_API_DOCS', False)
+FAIL_CLOSED_WITHOUT_DB = _env_flag(
+    'FAIL_CLOSED_WITHOUT_DB',
+    APP_ENV in {'prod', 'production'},
+)
 AUTH_CLOCK_SKEW_SECONDS = int(os.getenv('AUTH_CLOCK_SKEW_SECONDS', '120'))
-GOOGLE_TOKENINFO_URL = os.getenv(
-    'GOOGLE_TOKENINFO_URL',
-    'https://oauth2.googleapis.com/tokeninfo',
+GOOGLE_JWKS_URL = os.getenv(
+    'GOOGLE_JWKS_URL',
+    'https://www.googleapis.com/oauth2/v3/certs',
 )
-GOOGLE_TOKENINFO_TIMEOUT_SECONDS = float(
-    os.getenv('GOOGLE_TOKENINFO_TIMEOUT_SECONDS', '5')
+GOOGLE_JWKS_TIMEOUT_SECONDS = float(
+    os.getenv('GOOGLE_JWKS_TIMEOUT_SECONDS', '5')
 )
+GOOGLE_JWKS_CACHE_TTL_SECONDS = max(
+    60,
+    int(os.getenv('GOOGLE_JWKS_CACHE_TTL_SECONDS', '3600')),
+)
+GOOGLE_ID_TOKEN_ALGORITHMS = tuple(
+    alg.strip().upper()
+    for alg in os.getenv('GOOGLE_ID_TOKEN_ALGORITHMS', 'RS256').split(',')
+    if alg.strip()
+) or ('RS256',)
 _configured_client_ids = {
     value.strip()
     for value in (
@@ -130,6 +158,29 @@ AUTH_CACHE_LOCK = threading.Lock()
 AUTH_CACHE: dict[str, tuple[float, str]] = {}
 TRANSCRIPT_RATE_LOCK = threading.Lock()
 TRANSCRIPT_RATE_BUCKETS: dict[str, deque[float]] = {}
+WRITE_RATE_LIMIT_PER_WINDOW = int(os.getenv('WRITE_RATE_LIMIT_PER_WINDOW', '60'))
+WRITE_RATE_LIMIT_WINDOW_SECONDS = int(
+    os.getenv('WRITE_RATE_LIMIT_WINDOW_SECONDS', '60')
+)
+WRITE_RATE_LOCK = threading.Lock()
+WRITE_RATE_BUCKETS: dict[str, deque[float]] = {}
+RATE_LIMIT_MAX_BUCKETS = int(os.getenv('RATE_LIMIT_MAX_BUCKETS', '8192'))
+GOOGLE_JWKS_ISSUERS = (
+    'accounts.google.com',
+    'https://accounts.google.com',
+)
+GOOGLE_JWKS_LOCK = threading.Lock()
+GOOGLE_JWKS_BY_KID: dict[str, Any] = {}
+GOOGLE_JWKS_EXPIRES_AT = 0.0
+CAPTION_FORMAT_PRIORITY = {
+    'vtt': 0,
+    'json3': 1,
+    'srv3': 2,
+    'srv2': 3,
+    'srv1': 4,
+    'ttml': 5,
+    'xml': 6,
+}
 
 
 @asynccontextmanager
@@ -141,7 +192,15 @@ async def app_lifespan(_: FastAPI):
             'GOOGLE_CLIENT_IDS/GOOGLE_WEB_CLIENT_ID/GOOGLE_IOS_CLIENT_ID가 '
             '설정되지 않았습니다.'
         )
+    if FAIL_CLOSED_WITHOUT_DB and not is_db_enabled():
+        raise RuntimeError(
+            'FAIL_CLOSED_WITHOUT_DB=true 이지만 DATABASE_URL이 설정되지 않았습니다.'
+        )
     init_db()
+    if FAIL_CLOSED_WITHOUT_DB and not check_db():
+        raise RuntimeError(
+            'FAIL_CLOSED_WITHOUT_DB=true 이지만 데이터베이스 연결이 불가능합니다.'
+        )
     yield
 
 
@@ -200,6 +259,38 @@ def _transcript_slot(timeout: int):
         yield
     finally:
         TRANSCRIPT_SEMAPHORE.release()
+
+
+def _require_session(session: Any):
+    """Return a DB session or raise a consistent HTTP error."""
+    if session is None:
+        raise HTTPException(
+            status_code=503 if FAIL_CLOSED_WITHOUT_DB else 500,
+            detail='database required' if FAIL_CLOSED_WITHOUT_DB else 'database not available',
+        )
+    return session
+
+
+def _allow_file_fallback() -> bool:
+    return not FAIL_CLOSED_WITHOUT_DB
+
+
+def _require_database_for_write() -> None:
+    if FAIL_CLOSED_WITHOUT_DB and not is_db_enabled():
+        raise HTTPException(status_code=503, detail='database required')
+
+
+def _raise_db_unavailable(exc: Optional[Exception] = None) -> None:
+    status_code = 503 if FAIL_CLOSED_WITHOUT_DB else 500
+    detail = 'database required' if FAIL_CLOSED_WITHOUT_DB else 'database not available'
+    raise HTTPException(status_code=status_code, detail=detail) from exc
+
+
+def _is_postgres_session(session: Any) -> bool:
+    bind = getattr(session, 'bind', None)
+    dialect = getattr(bind, 'dialect', None)
+    return getattr(dialect, 'name', '') == 'postgresql'
+
 
 def _sanitize_user_id(raw_user_id: str) -> str:
     user_id = raw_user_id.strip()
@@ -300,6 +391,134 @@ def _extract_bearer_token(authorization: Optional[str]) -> str:
     return token.strip()
 
 
+def _extract_max_age(cache_control: str) -> Optional[int]:
+    match = re.search(r'max-age=(\d+)', cache_control)
+    if not match:
+        return None
+    return int(match.group(1))
+
+
+def _refresh_google_jwks(force_refresh: bool = False) -> dict[str, Any]:
+    global GOOGLE_JWKS_EXPIRES_AT
+    now = time.time()
+    with GOOGLE_JWKS_LOCK:
+        if (
+            not force_refresh
+            and GOOGLE_JWKS_BY_KID
+            and GOOGLE_JWKS_EXPIRES_AT > now
+        ):
+            return GOOGLE_JWKS_BY_KID
+
+        try:
+            response = requests.get(
+                GOOGLE_JWKS_URL,
+                timeout=GOOGLE_JWKS_TIMEOUT_SECONDS,
+            )
+        except requests.RequestException as exc:
+            raise HTTPException(
+                status_code=401,
+                detail='invalid access token',
+            ) from exc
+
+        if response.status_code != 200:
+            raise HTTPException(status_code=401, detail='invalid access token')
+
+        try:
+            payload = response.json()
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=401,
+                detail='invalid access token',
+            ) from exc
+
+        keys = payload.get('keys')
+        if not isinstance(keys, list):
+            raise HTTPException(status_code=401, detail='invalid access token')
+
+        jwks_by_kid: dict[str, Any] = {}
+        for key_data in keys:
+            if not isinstance(key_data, dict):
+                continue
+            key_id = key_data.get('kid')
+            if not isinstance(key_id, str) or not key_id:
+                continue
+            try:
+                jwks_by_kid[key_id] = jwt.PyJWK.from_dict(key_data).key
+            except jwt.PyJWTError:
+                continue
+
+        if not jwks_by_kid:
+            raise HTTPException(status_code=401, detail='invalid access token')
+
+        max_age = _extract_max_age(response.headers.get('Cache-Control', ''))
+        ttl = max_age if max_age is not None else GOOGLE_JWKS_CACHE_TTL_SECONDS
+        ttl = max(60, ttl)
+        GOOGLE_JWKS_BY_KID.clear()
+        GOOGLE_JWKS_BY_KID.update(jwks_by_kid)
+        GOOGLE_JWKS_EXPIRES_AT = now + ttl
+        return GOOGLE_JWKS_BY_KID
+
+
+def _resolve_google_signing_key(token: str):
+    try:
+        header = jwt.get_unverified_header(token)
+    except jwt.PyJWTError as exc:
+        raise HTTPException(status_code=401, detail='invalid access token') from exc
+
+    algorithm = (header.get('alg') or '').upper()
+    if algorithm not in GOOGLE_ID_TOKEN_ALGORITHMS:
+        raise HTTPException(status_code=401, detail='invalid token algorithm')
+
+    key_id = header.get('kid')
+    if not isinstance(key_id, str) or not key_id.strip():
+        raise HTTPException(status_code=401, detail='invalid access token')
+
+    key_map = _refresh_google_jwks()
+    key = key_map.get(key_id)
+    if key is None:
+        key_map = _refresh_google_jwks(force_refresh=True)
+        key = key_map.get(key_id)
+    if key is None:
+        raise HTTPException(status_code=401, detail='invalid access token')
+    return key
+
+
+def _extract_audiences(payload: dict[str, Any]) -> set[str]:
+    audience_claim = payload.get('aud')
+    if isinstance(audience_claim, str):
+        return {audience_claim}
+    if isinstance(audience_claim, list):
+        values = {item for item in audience_claim if isinstance(item, str)}
+        if values and len(values) == len(audience_claim):
+            return values
+    raise HTTPException(status_code=401, detail='token audience invalid')
+
+
+def _validate_google_token_claims(payload: dict[str, Any]) -> str:
+    issuer = payload.get('iss')
+    if issuer not in GOOGLE_JWKS_ISSUERS:
+        raise HTTPException(status_code=401, detail='token issuer mismatch')
+
+    audiences = _extract_audiences(payload)
+    if _configured_client_ids and not audiences.intersection(_configured_client_ids):
+        raise HTTPException(status_code=401, detail='token audience mismatch')
+
+    authorized_party = payload.get('azp')
+    if isinstance(payload.get('aud'), list) and len(audiences) > 1:
+        if not isinstance(authorized_party, str) or not authorized_party:
+            raise HTTPException(status_code=401, detail='token azp missing')
+        if authorized_party not in audiences:
+            raise HTTPException(status_code=401, detail='token azp mismatch')
+    if isinstance(authorized_party, str) and _configured_client_ids:
+        if authorized_party not in _configured_client_ids:
+            raise HTTPException(status_code=401, detail='token azp mismatch')
+
+    subject = payload.get('sub')
+    if not isinstance(subject, str) or not USER_ID_PATTERN.fullmatch(subject):
+        raise HTTPException(status_code=401, detail='invalid token subject')
+    return subject
+
+
 def _verify_google_user(token: str) -> str:
     now = time.time()
     with AUTH_CACHE_LOCK:
@@ -308,46 +527,28 @@ def _verify_google_user(token: str) -> str:
             return cached[1]
 
     try:
-        response = requests.get(
-            GOOGLE_TOKENINFO_URL,
-            params={'id_token': token},
-            timeout=GOOGLE_TOKENINFO_TIMEOUT_SECONDS,
+        signing_key = _resolve_google_signing_key(token)
+        payload = jwt.decode(
+            token,
+            signing_key,
+            algorithms=list(GOOGLE_ID_TOKEN_ALGORITHMS),
+            options={
+                'require': ['exp', 'iss', 'sub', 'aud'],
+                'verify_aud': False,
+            },
+            leeway=AUTH_CLOCK_SKEW_SECONDS,
         )
-    except requests.RequestException as exc:
+    except jwt.ExpiredSignatureError as exc:
+        raise HTTPException(status_code=401, detail='token expired') from exc
+    except jwt.PyJWTError as exc:
         raise HTTPException(status_code=401, detail='invalid access token') from exc
 
-    if response.status_code != 200:
-        raise HTTPException(status_code=401, detail='invalid access token')
-
-    try:
-        payload = response.json()
-    except ValueError as exc:
-        raise HTTPException(status_code=401, detail='invalid access token') from exc
-
-    audience = payload.get('aud')
-    if _configured_client_ids and audience not in _configured_client_ids:
-        raise HTTPException(status_code=401, detail='token audience mismatch')
-
-    issuer = payload.get('iss')
-    if issuer not in (
-        'accounts.google.com',
-        'https://accounts.google.com',
-    ):
-        raise HTTPException(status_code=401, detail='token issuer mismatch')
-
-    subject = payload.get('sub')
-    if not isinstance(subject, str) or not USER_ID_PATTERN.fullmatch(subject):
-        raise HTTPException(status_code=401, detail='invalid token subject')
-
+    subject = _validate_google_token_claims(payload)
     expires_at = payload.get('exp')
-    if not expires_at:
-        raise HTTPException(status_code=401, detail='token exp missing')
     try:
         expiry = float(expires_at)
     except (TypeError, ValueError) as exc:
         raise HTTPException(status_code=401, detail='token exp invalid') from exc
-    if expiry <= now - AUTH_CLOCK_SKEW_SECONDS:
-        raise HTTPException(status_code=401, detail='token expired')
 
     with AUTH_CACHE_LOCK:
         AUTH_CACHE[token] = (expiry, subject)
@@ -377,27 +578,57 @@ def _resolve_client_id(request: Request) -> str:
     return (client or 'unknown')[:128]
 
 
-def _enforce_transcript_rate_limit(client_id: str) -> None:
-    if TRANSCRIPT_RATE_LIMIT_PER_WINDOW <= 0:
+def _enforce_rate_limit(
+    *,
+    key: str,
+    per_window: int,
+    window_seconds: int,
+    lock: threading.Lock,
+    buckets: dict[str, deque[float]],
+) -> None:
+    if per_window <= 0:
         return
     now = time.monotonic()
-    cutoff = now - max(1, TRANSCRIPT_RATE_LIMIT_WINDOW_SECONDS)
-    with TRANSCRIPT_RATE_LOCK:
-        bucket = TRANSCRIPT_RATE_BUCKETS.setdefault(client_id, deque())
+    cutoff = now - max(1, window_seconds)
+    with lock:
+        bucket = buckets.setdefault(key, deque())
         while bucket and bucket[0] < cutoff:
             bucket.popleft()
-        if len(bucket) >= TRANSCRIPT_RATE_LIMIT_PER_WINDOW:
+        if len(bucket) >= per_window:
             raise HTTPException(
                 status_code=429,
                 detail='요청이 많아 잠시 후 다시 시도해주세요.',
             )
         bucket.append(now)
-        if len(TRANSCRIPT_RATE_BUCKETS) > 8192:
-            stale = [
-                key for key, values in TRANSCRIPT_RATE_BUCKETS.items() if not values
+        if len(buckets) > RATE_LIMIT_MAX_BUCKETS:
+            stale_keys = [
+                bucket_key
+                for bucket_key, values in buckets.items()
+                if not values or values[-1] < cutoff
             ]
-            for key in stale:
-                TRANSCRIPT_RATE_BUCKETS.pop(key, None)
+            for stale_key in stale_keys:
+                buckets.pop(stale_key, None)
+
+
+def _enforce_transcript_rate_limit(client_id: str) -> None:
+    _enforce_rate_limit(
+        key=f'transcript:{client_id}',
+        per_window=TRANSCRIPT_RATE_LIMIT_PER_WINDOW,
+        window_seconds=TRANSCRIPT_RATE_LIMIT_WINDOW_SECONDS,
+        lock=TRANSCRIPT_RATE_LOCK,
+        buckets=TRANSCRIPT_RATE_BUCKETS,
+    )
+
+
+def _enforce_write_rate_limit(request: Request, user_id: Optional[str] = None) -> None:
+    principal = f'user:{user_id}' if user_id else f'ip:{_resolve_client_id(request)}'
+    _enforce_rate_limit(
+        key=f'write:{principal}',
+        per_window=WRITE_RATE_LIMIT_PER_WINDOW,
+        window_seconds=WRITE_RATE_LIMIT_WINDOW_SECONDS,
+        lock=WRITE_RATE_LOCK,
+        buckets=WRITE_RATE_BUCKETS,
+    )
 
 
 @app.get('/')
@@ -475,6 +706,228 @@ class SelectionRequest(BaseModel):
     selected_ids: list[str]
 
 
+def _build_transcript_payload(
+    source_text: str,
+    *,
+    source: str,
+    summarize: bool,
+    summary_lines: Optional[int],
+    max_chars: int,
+) -> dict[str, Any]:
+    text, partial = trim_text(source_text, max_chars)
+    summary = build_summary(source_text, summary_lines) if summarize else None
+    return {
+        'text': text,
+        'summary': summary,
+        'source': source,
+        'partial': partial,
+    }
+
+
+def _resolve_audio_download_detail(error: Optional[str]) -> str:
+    detail = '음성 다운로드에 실패했습니다.'
+    if not error:
+        return detail
+    if is_membership_error(error):
+        return 'You might not have membership for this video.'
+    if 'HTTP Error 403' in error or 'Forbidden' in error:
+        return (
+            '음성 다운로드가 차단되었습니다. '
+            'YouTube 제한(로그인/연령/지역) 또는 다운로더 업데이트가 필요합니다.'
+        )
+    return detail
+
+
+def _normalize_selection_request(
+    req: SelectionRequest,
+) -> tuple[dict[str, dict[str, Optional[str]]], list[str]]:
+    if len(req.channels) > MAX_SELECTION_CHANNELS:
+        raise HTTPException(
+            status_code=413,
+            detail='too many channels in selection payload',
+        )
+
+    selected_ids = {
+        cid.strip()
+        for cid in req.selected_ids
+        if CHANNEL_ID_PATTERN.fullmatch(cid.strip())
+    }
+    if len(selected_ids) > MAX_SELECTION_CHANNELS:
+        raise HTTPException(
+            status_code=413,
+            detail='too many selected ids in payload',
+        )
+
+    normalized_channels: dict[str, dict[str, Optional[str]]] = {}
+    for channel in req.channels:
+        channel_id = channel.id.strip()
+        if not CHANNEL_ID_PATTERN.fullmatch(channel_id):
+            continue
+        title = channel.title.strip()[:MAX_CHANNEL_TITLE_LENGTH] or channel_id
+        thumbnail = (
+            (channel.thumbnail_url or '').strip()[:MAX_CHANNEL_THUMBNAIL_LENGTH]
+            or None
+        )
+        normalized_channels[channel_id] = {
+            'title': title,
+            'thumbnail_url': thumbnail,
+        }
+
+    channel_ids = set(normalized_channels.keys())
+    if not channel_ids:
+        return normalized_channels, []
+
+    normalized_selected_ids = sorted(
+        cid for cid in selected_ids if cid in channel_ids
+    )
+    return normalized_channels, normalized_selected_ids
+
+
+def _ensure_user_exists(session: Any, user_id: str) -> None:
+    if _is_postgres_session(session) and pg_insert is not None:
+        stmt = (
+            pg_insert(User.__table__)
+            .values(id=user_id, plan_tier='free')
+            .on_conflict_do_nothing(index_elements=['id'])
+        )
+        session.execute(stmt)
+        return
+
+    user = session.query(User).filter(User.id == user_id).first()
+    if user is None:
+        session.add(User(id=user_id, plan_tier='free'))
+        session.flush()
+
+
+def _upsert_channels(
+    session: Any,
+    normalized_channels: dict[str, dict[str, Optional[str]]],
+) -> None:
+    channel_ids = set(normalized_channels.keys())
+    if not channel_ids:
+        return
+
+    if _is_postgres_session(session) and pg_insert is not None:
+        values = [
+            {
+                'id': channel_id,
+                'youtube_channel_id': channel_id,
+                'title': payload['title'],
+                'thumbnail_url': payload['thumbnail_url'],
+            }
+            for channel_id, payload in normalized_channels.items()
+        ]
+        insert_stmt = pg_insert(Channel.__table__).values(values)
+        stmt = insert_stmt.on_conflict_do_update(
+            index_elements=['id'],
+            set_={
+                'youtube_channel_id': insert_stmt.excluded.youtube_channel_id,
+                'title': insert_stmt.excluded.title,
+                'thumbnail_url': insert_stmt.excluded.thumbnail_url,
+            },
+        )
+        session.execute(stmt)
+        return
+
+    rows = (
+        session.query(Channel)
+        .filter(Channel.id.in_(list(channel_ids)))
+        .all()
+    )
+    existing_channels = {row.id: row for row in rows}
+
+    for channel_id, payload in normalized_channels.items():
+        existing = existing_channels.get(channel_id)
+        if existing is None:
+            session.add(
+                Channel(
+                    id=channel_id,
+                    youtube_channel_id=channel_id,
+                    title=payload['title'],
+                    thumbnail_url=payload['thumbnail_url'],
+                )
+            )
+            continue
+        existing.title = payload['title']
+        existing.thumbnail_url = payload['thumbnail_url']
+
+
+def _sync_user_channel_links(
+    session: Any,
+    user_id: str,
+    selected_ids_sorted: list[str],
+) -> None:
+    now = datetime.now(timezone.utc)
+    if _is_postgres_session(session) and pg_insert is not None:
+        if selected_ids_sorted:
+            (
+                session.query(UserChannel)
+                .filter(
+                    UserChannel.user_id == user_id,
+                    UserChannel.channel_id.notin_(selected_ids_sorted),
+                )
+                .delete(synchronize_session=False)
+            )
+            values = [
+                {
+                    'user_id': user_id,
+                    'channel_id': channel_id,
+                    'is_selected': True,
+                    'synced_at': now,
+                }
+                for channel_id in selected_ids_sorted
+            ]
+            stmt = (
+                pg_insert(UserChannel.__table__)
+                .values(values)
+                .on_conflict_do_update(
+                    index_elements=['user_id', 'channel_id'],
+                    set_={
+                        'is_selected': True,
+                        'synced_at': now,
+                    },
+                )
+            )
+            session.execute(stmt)
+            return
+
+        (
+            session.query(UserChannel)
+            .filter(UserChannel.user_id == user_id)
+            .delete(synchronize_session=False)
+        )
+        return
+
+    existing_links = (
+        session.query(UserChannel)
+        .filter(UserChannel.user_id == user_id)
+        .all()
+    )
+    links_by_channel_id = {
+        row.channel_id: row for row in existing_links if row.channel_id
+    }
+
+    desired = set(selected_ids_sorted)
+    for channel_id, row in links_by_channel_id.items():
+        if channel_id not in desired:
+            session.delete(row)
+
+    for channel_id in selected_ids_sorted:
+        existing_link = links_by_channel_id.get(channel_id)
+        if existing_link is None:
+            session.add(
+                UserChannel(
+                    user_id=user_id,
+                    channel_id=channel_id,
+                    is_selected=True,
+                    synced_at=now,
+                )
+            )
+            continue
+        existing_link.is_selected = True
+        existing_link.synced_at = now
+
+
 @app.post('/transcript')
 def transcript(req: TranscriptRequest, request: Request):
     """Return transcript and summary for a YouTube video."""
@@ -492,18 +945,13 @@ def transcript(req: TranscriptRequest, request: Request):
             caption_text = fetch_caption_text_via_ytdlp(video_id)
 
         if caption_text:
-            text, partial = trim_text(caption_text, max_chars)
-            summary = (
-                build_summary(caption_text, req.summary_lines)
-                if req.summarize
-                else None
+            payload = _build_transcript_payload(
+                caption_text,
+                source='captions',
+                summarize=req.summarize,
+                summary_lines=req.summary_lines,
+                max_chars=max_chars,
             )
-            payload = {
-                'text': text,
-                'summary': summary,
-                'source': 'captions',
-                'partial': partial,
-            }
             save_cache(video_id, payload)
             return {**payload, 'cached': False}
 
@@ -515,16 +963,10 @@ def transcript(req: TranscriptRequest, request: Request):
 
         audio_path, error = download_audio(video_id)
         if audio_path is None:
-            detail = '음성 다운로드에 실패했습니다.'
-            if error:
-                if is_membership_error(error):
-                    detail = 'You might not have membership for this video.'
-                elif 'HTTP Error 403' in error or 'Forbidden' in error:
-                    detail = (
-                        '음성 다운로드가 차단되었습니다. '
-                        'YouTube 제한(로그인/연령/지역) 또는 다운로더 업데이트가 필요합니다.'
-                    )
-            raise HTTPException(status_code=500, detail=detail)
+            raise HTTPException(
+                status_code=500,
+                detail=_resolve_audio_download_detail(error),
+            )
 
         try:
             transcript_text = transcribe_audio(audio_path)
@@ -537,18 +979,13 @@ def transcript(req: TranscriptRequest, request: Request):
         if not transcript_text:
             raise HTTPException(status_code=500, detail='음성 인식에 실패했습니다.')
 
-        text, partial = trim_text(transcript_text, max_chars)
-        summary = (
-            build_summary(transcript_text, req.summary_lines)
-            if req.summarize
-            else None
+        payload = _build_transcript_payload(
+            transcript_text,
+            source='whisper',
+            summarize=req.summarize,
+            summary_lines=req.summary_lines,
+            max_chars=max_chars,
         )
-        payload = {
-            'text': text,
-            'summary': summary,
-            'source': 'whisper',
-            'partial': partial,
-        }
         save_cache(video_id, payload)
         return {**payload, 'cached': False}
 
@@ -560,11 +997,13 @@ def list_archives(
 ):
     """List archived videos for a user."""
     user_id = _authorize_user(user_id, authorization)
+    if FAIL_CLOSED_WITHOUT_DB and not is_db_enabled():
+        raise HTTPException(status_code=503, detail='database required')
     if is_db_enabled():
         try:
             with get_session() as session:
                 if session is None:
-                    return {'items': []}
+                    _raise_db_unavailable()
                 items = (
                     session.query(Archive)
                     .filter(Archive.user_id == user_id)
@@ -582,28 +1021,35 @@ def list_archives(
                         for item in items
                     ]
                 }
-        except SQLAlchemyError:
+        except SQLAlchemyError as exc:
+            if FAIL_CLOSED_WITHOUT_DB:
+                raise HTTPException(
+                    status_code=503,
+                    detail='database required',
+                ) from exc
             return {'items': []}
+    if not _allow_file_fallback():
+        raise HTTPException(status_code=503, detail='database required')
     return {'items': _load_archives_file(user_id)}
 
 
 @app.post('/archives/toggle')
 def toggle_archive(
     req: ArchiveToggleRequest,
+    request: Request,
     authorization: Optional[str] = Header(default=None),
 ):
     """Toggle archive status for a video."""
     user_id = _authorize_user(req.user_id, authorization)
+    _enforce_write_rate_limit(request, user_id)
     video_id = _sanitize_archive_video_id(req.video_id)
+    _require_database_for_write()
 
     if is_db_enabled():
         try:
             with get_session() as session:
                 if session is None:
-                    raise HTTPException(
-                        status_code=500,
-                        detail='database not available',
-                    )
+                    _raise_db_unavailable()
                 user = session.query(User).filter(User.id == user_id).first()
                 if user is None:
                     session.add(User(id=user_id, plan_tier='free'))
@@ -633,39 +1079,53 @@ def toggle_archive(
                 status_code=409, detail='archive conflict'
             ) from exc
         except SQLAlchemyError as exc:
+            if FAIL_CLOSED_WITHOUT_DB:
+                raise HTTPException(
+                    status_code=503,
+                    detail='database required',
+                ) from exc
             raise HTTPException(
                 status_code=500, detail='archive update failed'
             ) from exc
 
+    if not _allow_file_fallback():
+        raise HTTPException(status_code=503, detail='database required')
     return _toggle_archive_file(user_id, video_id)
 
 
 @app.post('/archives/clear')
 def clear_archives(
     req: ArchiveClearRequest,
+    request: Request,
     authorization: Optional[str] = Header(default=None),
 ):
     """Clear all archive entries for a user."""
     user_id = _authorize_user(req.user_id, authorization)
+    _enforce_write_rate_limit(request, user_id)
+    _require_database_for_write()
 
     if is_db_enabled():
         try:
             with get_session() as session:
                 if session is None:
-                    raise HTTPException(
-                        status_code=500,
-                        detail='database not available',
-                    )
+                    _raise_db_unavailable()
                 session.query(Archive).filter(
                     Archive.user_id == user_id
                 ).delete()
                 session.commit()
                 return {'cleared': True}
         except SQLAlchemyError as exc:
+            if FAIL_CLOSED_WITHOUT_DB:
+                raise HTTPException(
+                    status_code=503,
+                    detail='database required',
+                ) from exc
             raise HTTPException(
                 status_code=500, detail='archive clear failed'
             ) from exc
 
+    if not _allow_file_fallback():
+        raise HTTPException(status_code=503, detail='database required')
     _save_archives_file(user_id, [])
     return {'cleared': True}
 
@@ -673,12 +1133,15 @@ def clear_archives(
 @app.post('/user/upsert')
 def upsert_user(
     req: UserUpsertRequest,
+    request: Request,
     authorization: Optional[str] = Header(default=None),
 ):
     """Create or update a user profile."""
     user_id = _authorize_user(req.user_id, authorization)
+    _enforce_write_rate_limit(request, user_id)
     email = _sanitize_email(req.email)
     plan_tier = _sanitize_plan_tier(req.plan_tier) if req.plan_tier else None
+    _require_database_for_write()
     if not is_db_enabled():
         return {
             'user_id': user_id,
@@ -688,10 +1151,7 @@ def upsert_user(
     try:
         with get_session() as session:
             if session is None:
-                raise HTTPException(
-                    status_code=500,
-                    detail='database not available',
-                )
+                _raise_db_unavailable()
             user = session.query(User).filter(User.id == user_id).first()
             if user is None:
                 user = User(
@@ -711,6 +1171,11 @@ def upsert_user(
                 'plan_tier': user.plan_tier,
             }
     except SQLAlchemyError as exc:
+        if FAIL_CLOSED_WITHOUT_DB:
+            raise HTTPException(
+                status_code=503,
+                detail='database required',
+            ) from exc
         raise HTTPException(
             status_code=500, detail='user upsert failed'
         ) from exc
@@ -749,20 +1214,20 @@ def get_user(
 @app.post('/user/plan')
 def update_user_plan(
     req: UserPlanRequest,
+    request: Request,
     authorization: Optional[str] = Header(default=None),
 ):
     """Update or create the user's plan tier."""
     user_id = _authorize_user(req.user_id, authorization)
+    _enforce_write_rate_limit(request, user_id)
     plan_tier = _sanitize_plan_tier(req.plan_tier)
+    _require_database_for_write()
     if not is_db_enabled():
         return {'updated': True, 'plan_tier': plan_tier}
     try:
         with get_session() as session:
             if session is None:
-                raise HTTPException(
-                    status_code=500,
-                    detail='database not available',
-                )
+                _raise_db_unavailable()
             user = session.query(User).filter(User.id == user_id).first()
             if user is None:
                 user = User(id=user_id, plan_tier=plan_tier)
@@ -772,6 +1237,11 @@ def update_user_plan(
             session.commit()
             return {'updated': True, 'plan_tier': user.plan_tier}
     except SQLAlchemyError as exc:
+        if FAIL_CLOSED_WITHOUT_DB:
+            raise HTTPException(
+                status_code=503,
+                detail='database required',
+            ) from exc
         raise HTTPException(
             status_code=500, detail='plan update failed'
         ) from exc
@@ -830,10 +1300,12 @@ def get_user_state(
 @app.post('/user/state')
 def upsert_user_state(
     req: UserStateUpsertRequest,
+    request: Request,
     authorization: Optional[str] = Header(default=None),
 ):
     """Upsert per-user app state for cross-device sync."""
     user_id = _authorize_user(req.user_id, authorization)
+    _enforce_write_rate_limit(request, user_id)
     selection_change_day = _sanitize_selection_change_day(
         req.selection_change_day
     )
@@ -846,15 +1318,13 @@ def upsert_user_state(
         'selection_changes_today': selection_changes_today,
         'opened_video_ids': opened_video_ids,
     }
+    _require_database_for_write()
     if not is_db_enabled():
         return payload
     try:
         with get_session() as session:
             if session is None:
-                raise HTTPException(
-                    status_code=500,
-                    detail='database not available',
-                )
+                _raise_db_unavailable()
             user = session.query(User).filter(User.id == user_id).first()
             if user is None:
                 user = User(id=user_id, plan_tier='free')
@@ -877,6 +1347,11 @@ def upsert_user_state(
             session.commit()
             return payload
     except SQLAlchemyError as exc:
+        if FAIL_CLOSED_WITHOUT_DB:
+            raise HTTPException(
+                status_code=503,
+                detail='database required',
+            ) from exc
         raise HTTPException(
             status_code=500, detail='user state upsert failed'
         ) from exc
@@ -893,11 +1368,7 @@ def get_selection(
         return {'selected_ids': []}
     try:
         with get_session() as session:
-            if session is None:
-                raise HTTPException(
-                    status_code=500,
-                    detail='database not available',
-                )
+            session = _require_session(session)
             rows = (
                 session.query(UserChannel)
                 .filter(
@@ -916,113 +1387,22 @@ def get_selection(
 @app.post('/selection')
 def save_selection(
     req: SelectionRequest,
+    request: Request,
     authorization: Optional[str] = Header(default=None),
 ):
     """Save selected channels for a user."""
     user_id = _authorize_user(req.user_id, authorization)
-    if len(req.channels) > MAX_SELECTION_CHANNELS:
-        raise HTTPException(
-            status_code=413,
-            detail='too many channels in selection payload',
-        )
-    selected_ids = {
-        cid.strip()
-        for cid in req.selected_ids
-        if CHANNEL_ID_PATTERN.fullmatch(cid.strip())
-    }
-    if len(selected_ids) > MAX_SELECTION_CHANNELS:
-        raise HTTPException(
-            status_code=413,
-            detail='too many selected ids in payload',
-        )
-    normalized_channels = {}
-    for channel in req.channels:
-        channel_id = channel.id.strip()
-        if not CHANNEL_ID_PATTERN.fullmatch(channel_id):
-            continue
-        title = channel.title.strip()[:MAX_CHANNEL_TITLE_LENGTH] or channel_id
-        thumbnail = (
-            (channel.thumbnail_url or '').strip()[:MAX_CHANNEL_THUMBNAIL_LENGTH]
-            or None
-        )
-        normalized_channels[channel_id] = {
-            'title': title,
-            'thumbnail_url': thumbnail,
-        }
-    channel_ids = set(normalized_channels.keys())
-    if channel_ids:
-        selected_ids = {cid for cid in selected_ids if cid in channel_ids}
-    else:
-        selected_ids = set()
-    selected_ids_sorted = sorted(selected_ids)
+    _enforce_write_rate_limit(request, user_id)
+    normalized_channels, selected_ids_sorted = _normalize_selection_request(req)
+    _require_database_for_write()
     if not is_db_enabled():
         return {'selected_ids': selected_ids_sorted}
     try:
         with get_session() as session:
-            if session is None:
-                raise HTTPException(
-                    status_code=500,
-                    detail='database not available',
-                )
-            # Ensure user exists
-            user = session.query(User).filter(User.id == user_id).first()
-            if user is None:
-                user = User(id=user_id, plan_tier='free')
-                session.add(user)
-
-            # Bulk fetch once to avoid N+1 channel lookups.
-            existing_channels = {}
-            if channel_ids:
-                rows = (
-                    session.query(Channel)
-                    .filter(Channel.id.in_(list(channel_ids)))
-                    .all()
-                )
-                existing_channels = {row.id: row for row in rows}
-
-            for channel_id, payload in normalized_channels.items():
-                existing = existing_channels.get(channel_id)
-                if existing is None:
-                    session.add(
-                        Channel(
-                            id=channel_id,
-                            youtube_channel_id=channel_id,
-                            title=payload['title'],
-                            thumbnail_url=payload['thumbnail_url'],
-                        )
-                    )
-                    continue
-                existing.title = payload['title']
-                existing.thumbnail_url = payload['thumbnail_url']
-
-            existing_links = (
-                session.query(UserChannel)
-                .filter(UserChannel.user_id == user_id)
-                .all()
-            )
-            links_by_channel_id = {
-                row.channel_id: row for row in existing_links if row.channel_id
-            }
-            desired = set(selected_ids_sorted)
-            for channel_id, row in links_by_channel_id.items():
-                if channel_id not in desired:
-                    session.delete(row)
-
-            now = datetime.now(timezone.utc)
-            for channel_id in desired:
-                existing_link = links_by_channel_id.get(channel_id)
-                if existing_link is None:
-                    session.add(
-                        UserChannel(
-                            user_id=user_id,
-                            channel_id=channel_id,
-                            is_selected=True,
-                            synced_at=now,
-                        )
-                    )
-                    continue
-                existing_link.is_selected = True
-                existing_link.synced_at = now
+            session = _require_session(session)
+            _ensure_user_exists(session, user_id)
+            _upsert_channels(session, normalized_channels)
+            _sync_user_channel_links(session, user_id, selected_ids_sorted)
 
             session.commit()
             return {'selected_ids': selected_ids_sorted}
@@ -1031,6 +1411,11 @@ def save_selection(
             status_code=409, detail='selection conflict'
         ) from exc
     except SQLAlchemyError as exc:
+        if FAIL_CLOSED_WITHOUT_DB:
+            raise HTTPException(
+                status_code=503,
+                detail='database required',
+            ) from exc
         raise HTTPException(
             status_code=500, detail='selection save failed'
         ) from exc
@@ -1183,12 +1568,16 @@ def load_cache(video_id: str) -> Optional[dict]:
     cached = _load_cache_from_db(video_id)
     if cached:
         return cached
+    if not _allow_file_fallback():
+        return None
     return _load_cache_from_file(video_id)
 
 
 def save_cache(video_id: str, payload: dict) -> None:
     """Persist transcript cache to DB or local file."""
     if _save_cache_to_db(video_id, payload):
+        return
+    if not _allow_file_fallback():
         return
     _save_cache_to_file(video_id, payload)
 
@@ -1394,11 +1783,6 @@ def fetch_ytdlp_info(
 ) -> Optional[dict]:
     """Retrieve yt-dlp metadata for a video."""
     url = f'https://www.youtube.com/watch?v={video_id}'
-    player_clients = [
-        c.strip()
-        for c in YTDLP_PLAYER_CLIENTS.split(',')
-        if c.strip()
-    ]
     ydl_opts = {
         'quiet': True,
         'skip_download': True,
@@ -1408,7 +1792,8 @@ def fetch_ytdlp_info(
         'geo_bypass': True,
         'extractor_args': {
             'youtube': {
-                'player_client': player_clients or ['android', 'web'],
+                'player_client': list(YTDLP_PLAYER_CLIENT_LIST)
+                or ['android', 'web'],
             }
         },
     }
@@ -1445,11 +1830,9 @@ def pick_lang_entries(tracks: dict) -> list[dict]:
 
 def sort_caption_entries(entries: list[dict]) -> list[dict]:
     """Sort caption entries by preferred formats."""
-    order = ['vtt', 'json3', 'srv3', 'srv2', 'srv1', 'ttml', 'xml']
-
     def score(entry: dict) -> int:
         ext = (entry.get('ext') or '').lower()
-        return order.index(ext) if ext in order else len(order)
+        return CAPTION_FORMAT_PRIORITY.get(ext, len(CAPTION_FORMAT_PRIORITY))
 
     return sorted(entries, key=score)
 
@@ -1636,11 +2019,6 @@ def download_audio(video_id: str) -> tuple[Optional[str], Optional[str]]:
     url = f'https://www.youtube.com/watch?v={video_id}'
     with tempfile.TemporaryDirectory() as tmpdir:
         output = os.path.join(tmpdir, f'{video_id}.%(ext)s')
-        player_clients = [
-            c.strip()
-            for c in YTDLP_PLAYER_CLIENTS.split(',')
-            if c.strip()
-        ]
         ydl_opts = {
             'format': 'bestaudio[ext=m4a]/bestaudio/best',
             'outtmpl': output,
@@ -1649,7 +2027,8 @@ def download_audio(video_id: str) -> tuple[Optional[str], Optional[str]]:
             'geo_bypass': True,
             'extractor_args': {
                 'youtube': {
-                    'player_client': player_clients or ['android', 'web'],
+                    'player_client': list(YTDLP_PLAYER_CLIENT_LIST)
+                    or ['android', 'web'],
                 }
             },
         }

@@ -32,11 +32,7 @@ class CalendarScreen extends ConsumerWidget {
       });
     }
 
-    final archiveMap = _filteredArchives(
-      appState,
-      filterChannelId,
-      useArchives: true,
-    );
+    final archiveMap = _filteredArchives(appState, filterChannelId);
     final selectedKey =
         DateTime(selectedDay.year, selectedDay.month, selectedDay.day);
     final selectedVideos = archiveMap[selectedKey] ?? [];
@@ -238,37 +234,21 @@ class CalendarScreen extends ConsumerWidget {
 
   Map<DateTime, List<Video>> _filteredArchives(
     AppStateData state,
-    String filterChannelId, {
-    required bool useArchives,
-  }) {
+    String filterChannelId,
+  ) {
     final Map<DateTime, List<Video>> result = {};
-
-    if (useArchives) {
-      final videoMap = {for (final v in state.videos) v.id: v};
-      for (final entry in state.archives) {
-        final video = videoMap[entry.videoId];
-        if (video == null) continue;
-        if (filterChannelId != allChannelsFilter &&
-            video.channelId != filterChannelId) {
-          continue;
-        }
-        final day = DateTime(entry.archivedAt.year, entry.archivedAt.month,
-            entry.archivedAt.day);
-        result.putIfAbsent(day, () => []).add(video);
-      }
-      return result;
-    }
-
-    for (final video in state.videos) {
+    final videoMap = {for (final v in state.videos) v.id: v};
+    for (final entry in state.archives) {
+      final video = videoMap[entry.videoId];
+      if (video == null) continue;
       if (filterChannelId != allChannelsFilter &&
           video.channelId != filterChannelId) {
         continue;
       }
-      final day = DateTime(video.publishedAt.year, video.publishedAt.month,
-          video.publishedAt.day);
+      final day = DateTime(
+          entry.archivedAt.year, entry.archivedAt.month, entry.archivedAt.day);
       result.putIfAbsent(day, () => []).add(video);
     }
-
     return result;
   }
 }
@@ -473,6 +453,7 @@ class _CalendarGrid extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final days = _generateCalendarDays(month);
+    final archiveDayKeys = archives.keys.map(_dayKey).toSet();
 
     return GlassSurface(
       settings: LiquidGlassPresets.panel,
@@ -500,8 +481,7 @@ class _CalendarGrid extends StatelessWidget {
               final isSelected = day.year == selectedDay.year &&
                   day.month == selectedDay.month &&
                   day.day == selectedDay.day;
-              final hasArchive =
-                  archives.containsKey(DateTime(day.year, day.month, day.day));
+              final hasArchive = archiveDayKeys.contains(_dayKey(day));
 
               return Semantics(
                 button: true,
@@ -564,6 +544,8 @@ class _CalendarGrid extends StatelessWidget {
     final start = firstDay.subtract(Duration(days: firstWeekday - 1));
     return List.generate(42, (index) => start.add(Duration(days: index)));
   }
+
+  int _dayKey(DateTime date) => date.year * 10000 + date.month * 100 + date.day;
 }
 
 class _WeekdayLabel extends StatelessWidget {

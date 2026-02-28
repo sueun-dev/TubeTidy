@@ -1,6 +1,6 @@
 name: youtube_summary
 description: iOS-first YouTube tech/trend 3-line summary app.
-version: 0.1.0+1
+version: 1.0.0+1
 publish_to: 'none'
 
 environment:
@@ -12,7 +12,7 @@ dependencies:
   cupertino_icons: ^1.0.6
   intl: ^0.19.0
   google_sign_in: ^6.2.1
-  google_sign_in_web: any
+  google_sign_in_web: ^0.12.4
   http: ^1.2.2
   shared_preferences: ^2.3.3
   flutter_riverpod: ^2.6.1
@@ -23,6 +23,8 @@ dependencies:
 
 dev_dependencies:
   flutter_test:
+    sdk: flutter
+  integration_test:
     sdk: flutter
   flutter_lints: ^3.0.0
 

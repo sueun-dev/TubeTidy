@@ -2,12 +2,15 @@
 
 import importlib
 import os
+from concurrent.futures import ThreadPoolExecutor
+import threading
 import unittest
 import uuid
 from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
 
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, text
+from sqlalchemy.exc import OperationalError
 
 
 def _with_schema(database_url: str, schema: str) -> str:
@@ -24,21 +27,28 @@ class DatabaseIntegrationTest(unittest.TestCase):
     def setUpClass(cls) -> None:
         cls.base_database_url = os.getenv('DATABASE_URL')
         if not cls.base_database_url:
-            raise RuntimeError(
-                'DATABASE_URL must be set for DB integration tests.'
+            raise unittest.SkipTest(
+                'DATABASE_URL is not set. Skipping DB integration tests.'
             )
-        cls.previous_require_auth = os.getenv('BACKEND_REQUIRE_AUTH')
-        os.environ['BACKEND_REQUIRE_AUTH'] = 'false'
 
         cls.schema = f'test_schema_{uuid.uuid4().hex}'
         cls.schema_url = _with_schema(cls.base_database_url, cls.schema)
 
         engine = create_engine(cls.base_database_url)
-        with engine.connect() as conn:
-            conn.execute(text(f'CREATE SCHEMA "{cls.schema}"'))
-            conn.commit()
-        engine.dispose()
+        try:
+            with engine.connect() as conn:
+                conn.execute(text(f'CREATE SCHEMA "{cls.schema}"'))
+                conn.commit()
+        except OperationalError as exc:
+            raise unittest.SkipTest(
+                'PostgreSQL is unavailable for DB integration tests: '
+                f'{exc.__class__.__name__}'
+            ) from exc
+        finally:
+            engine.dispose()
 
+        cls.previous_require_auth = os.getenv('BACKEND_REQUIRE_AUTH')
+        os.environ['BACKEND_REQUIRE_AUTH'] = 'false'
         os.environ['DATABASE_URL'] = cls.schema_url
         import server.db as db
         import server.app as app
@@ -181,7 +191,6 @@ class DatabaseIntegrationTest(unittest.TestCase):
             body.get('opened_video_ids'),
             ['abc12345xyz', 'def67890uvw'],
         )
-
         response = self.client.get('/user/state', params={'user_id': user_id})
         self.assertEqual(response.status_code, 200)
         body = response.json()
@@ -191,6 +200,80 @@ class DatabaseIntegrationTest(unittest.TestCase):
             body.get('opened_video_ids'),
             ['abc12345xyz', 'def67890uvw'],
         )
+
+    def test_selection_concurrent_writes_remain_consistent(self) -> None:
+        """Concurrent selection writes should not leave duplicate links."""
+        import server.app as app_module
+        from server.db import get_session
+        from server.models import UserChannel
+
+        user_id = f'user_{uuid.uuid4().hex}'
+        channels = [
+            {
+                'id': 'channel-a',
+                'title': 'Channel A',
+                'thumbnail_url': 'https://example.com/a.jpg',
+            },
+            {
+                'id': 'channel-b',
+                'title': 'Channel B',
+                'thumbnail_url': 'https://example.com/b.jpg',
+            },
+            {
+                'id': 'channel-c',
+                'title': 'Channel C',
+                'thumbnail_url': 'https://example.com/c.jpg',
+            },
+        ]
+        payload_a = {
+            'user_id': user_id,
+            'channels': channels,
+            'selected_ids': ['channel-a'],
+        }
+        payload_b = {
+            'user_id': user_id,
+            'channels': channels,
+            'selected_ids': ['channel-b', 'channel-c'],
+        }
+        expected_sets = {
+            frozenset(payload_a['selected_ids']),
+            frozenset(payload_b['selected_ids']),
+        }
+        barrier = threading.Barrier(3)
+
+        def _write_selection(payload):
+            with TestClient(app_module.app) as client:
+                barrier.wait(timeout=5)
+                return client.post('/selection', json=payload)
+
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            future_a = executor.submit(_write_selection, payload_a)
+            future_b = executor.submit(_write_selection, payload_b)
+            barrier.wait(timeout=5)
+            response_a = future_a.result(timeout=10)
+            response_b = future_b.result(timeout=10)
+
+        self.assertEqual(response_a.status_code, 200)
+        self.assertEqual(response_b.status_code, 200)
+
+        response = self.client.get('/selection', params={'user_id': user_id})
+        self.assertEqual(response.status_code, 200)
+        final_selected = set(response.json().get('selected_ids', []))
+        self.assertIn(frozenset(final_selected), expected_sets)
+
+        with get_session() as session:
+            self.assertIsNotNone(session)
+            rows = (
+                session.query(UserChannel)
+                .filter(
+                    UserChannel.user_id == user_id,
+                    UserChannel.is_selected.is_(True),
+                )
+                .all()
+            )
+            row_ids = [row.channel_id for row in rows]
+        self.assertEqual(len(row_ids), len(set(row_ids)))
+        self.assertEqual(set(row_ids), final_selected)
 
 
 if __name__ == '__main__':

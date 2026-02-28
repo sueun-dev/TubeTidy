@@ -33,23 +33,22 @@ class SelectionService {
   }) async {
     if (userId.isEmpty) return false;
     final uri = BackendApi.uri('/selection');
-    final normalizedSelected = selectedIds
-        .map((id) => id.trim())
-        .where((id) => id.isNotEmpty)
-        .toSet()
-        .toList()
-      ..sort();
-    final selectedSet = normalizedSelected.toSet();
-    final payloadChannels = channels
-        .where((channel) => selectedSet.contains(channel.id))
-        .map(
-          (channel) => {
-            'id': channel.id,
-            'title': channel.title,
-            'thumbnail_url': channel.thumbnailUrl,
-          },
-        )
-        .toList();
+    final normalizedSelectedSet = <String>{};
+    for (final rawId in selectedIds) {
+      final normalized = rawId.trim();
+      if (normalized.isEmpty) continue;
+      normalizedSelectedSet.add(normalized);
+    }
+    final normalizedSelected = normalizedSelectedSet.toList()..sort();
+    final payloadChannels = <Map<String, String>>[];
+    for (final channel in channels) {
+      if (!normalizedSelectedSet.contains(channel.id)) continue;
+      payloadChannels.add({
+        'id': channel.id,
+        'title': channel.title,
+        'thumbnail_url': channel.thumbnailUrl,
+      });
+    }
     try {
       final response = await http
           .post(
