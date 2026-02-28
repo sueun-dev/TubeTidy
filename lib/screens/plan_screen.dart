@@ -1,5 +1,6 @@
 import 'package:flutter/cupertino.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:url_launcher/url_launcher.dart';
 
 import '../localization/app_strings.dart';
 import '../models/plan.dart';
@@ -113,10 +114,7 @@ class PlanScreen extends ConsumerWidget {
                                 horizontal: 14,
                                 vertical: 9,
                               ),
-                              onPressed: () {
-                                _handleRestorePurchases(
-                                    context, strings, controller);
-                              },
+                              onPressed: () => _handleViewReceipt(),
                               child: Text(
                                 strings.viewReceipt,
                                 style: const TextStyle(
@@ -176,6 +174,13 @@ class PlanScreen extends ConsumerWidget {
         ),
       ),
     );
+  }
+
+  Future<void> _handleViewReceipt() async {
+    final uri = Uri.parse('https://apps.apple.com/account/subscriptions');
+    if (await canLaunchUrl(uri)) {
+      await launchUrl(uri, mode: LaunchMode.externalApplication);
+    }
   }
 
   Future<void> _handlePlanSelection(

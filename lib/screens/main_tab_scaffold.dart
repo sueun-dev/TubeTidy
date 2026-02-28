@@ -31,23 +31,38 @@ class MainTabScaffold extends ConsumerWidget {
         ),
         items: [
           BottomNavigationBarItem(
-            icon: const Icon(CupertinoIcons.house_fill),
+            icon: const Icon(
+              CupertinoIcons.house_fill,
+              key: ValueKey('tab-home'),
+            ),
             label: strings.tabHome,
           ),
           BottomNavigationBarItem(
-            icon: const Icon(CupertinoIcons.calendar),
+            icon: const Icon(
+              CupertinoIcons.calendar,
+              key: ValueKey('tab-calendar'),
+            ),
             label: strings.tabCalendar,
           ),
           BottomNavigationBarItem(
-            icon: const Icon(CupertinoIcons.plus_app_fill),
+            icon: const Icon(
+              CupertinoIcons.plus_app_fill,
+              key: ValueKey('tab-channels'),
+            ),
             label: strings.tabChannels,
           ),
           BottomNavigationBarItem(
-            icon: const Icon(CupertinoIcons.creditcard_fill),
+            icon: const Icon(
+              CupertinoIcons.creditcard_fill,
+              key: ValueKey('tab-plan'),
+            ),
             label: strings.tabPlan,
           ),
           BottomNavigationBarItem(
-            icon: const Icon(CupertinoIcons.settings),
+            icon: const Icon(
+              CupertinoIcons.settings,
+              key: ValueKey('tab-settings'),
+            ),
             label: strings.tabSettings,
           ),
         ],

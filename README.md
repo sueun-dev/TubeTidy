@@ -17,6 +17,14 @@ AI-powered YouTube summary app (Flutter) that syncs subscriptions, extracts capt
   - Audio download + Whisper STT fallback
   - Summary generation via OpenAI
 
+## Documentation
+- `docs/README.md`: documentation index
+- `docs/operations/`: runbooks, release checklist, infra status
+- `docs/reports/`: refactoring/change reports
+- `docs/security/`: security checklist and release hardening notes
+- `docs/notes/`: working notes and troubleshooting logs
+- `docs/confirm/`: centralized per-folder validation snapshots
+
 ## Requirements
 - Flutter 3.19+
 - Python 3.9+
@@ -130,6 +138,7 @@ flutter test
 ./.venv/bin/python -m unittest server.tests.test_app
 DATABASE_URL=postgresql+psycopg2://youtube_summary:youtube_summary@127.0.0.1:5433/youtube_summary ./.venv/bin/python -m unittest server.tests.test_db_integration
 ```
+If PostgreSQL is unavailable, `server.tests.test_db_integration` is skipped automatically.
 
 ---
 If you want a simple demo flow:

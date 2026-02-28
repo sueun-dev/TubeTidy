@@ -279,12 +279,14 @@ class ChannelSelectionScreen extends ConsumerWidget {
                   child: SizedBox(
                     width: double.infinity,
                     child: CupertinoButton.filled(
+                      key: const ValueKey('selection-complete-button'),
                       borderRadius: BorderRadius.circular(LiquidRadius.sm),
                       onPressed: appState.isLoading || !appState.hasSelection
                           ? null
                           : () async {
-                              await controller.finalizeChannelSelection();
-                              if (context.mounted) {
+                              final completed =
+                                  await controller.finalizeChannelSelection();
+                              if (completed && context.mounted) {
                                 context.go('/app');
                               }
                             },

@@ -2,6 +2,7 @@ import 'package:flutter/cupertino.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../app_config.dart';
 import '../localization/app_strings.dart';
 import '../state/app_controller.dart';
 import '../theme.dart';
@@ -89,19 +90,36 @@ class OnboardingScreen extends ConsumerWidget {
                         children: [
                           SizedBox(
                             width: double.infinity,
-                            child: kIsWeb
-                                ? GoogleSignInButton(
-                                    disabled: appState.isLoading,
-                                  )
-                                : CupertinoButton.filled(
+                            child: AppConfig.e2eTestMode
+                                ? CupertinoButton(
+                                    key: const ValueKey('e2e-login-button'),
+                                    color: LiquidColors.glassLight,
+                                    borderRadius:
+                                        BorderRadius.circular(LiquidRadius.sm),
                                     onPressed: appState.isLoading
                                         ? null
-                                        : controller.signInWithGoogle,
-                                    child: appState.isLoading
-                                        ? const CupertinoActivityIndicator(
-                                            color: CupertinoColors.white)
-                                        : Text(strings.signInWithGoogle),
-                                  ),
+                                        : controller.signInForE2E,
+                                    child: Text(
+                                      'E2E 테스트 로그인',
+                                      style: LiquidTextStyles.footnote.copyWith(
+                                        color: LiquidColors.brand,
+                                        fontWeight: FontWeight.w600,
+                                      ),
+                                    ),
+                                  )
+                                : (kIsWeb
+                                    ? GoogleSignInButton(
+                                        disabled: appState.isLoading,
+                                      )
+                                    : CupertinoButton.filled(
+                                        onPressed: appState.isLoading
+                                            ? null
+                                            : controller.signInWithGoogle,
+                                        child: appState.isLoading
+                                            ? const CupertinoActivityIndicator(
+                                                color: CupertinoColors.white)
+                                            : Text(strings.signInWithGoogle),
+                                      )),
                           ),
                           const SizedBox(height: 10),
                           Text(
