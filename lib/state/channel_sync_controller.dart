@@ -85,10 +85,10 @@ class ChannelSyncController {
     required Set<String> selectedChannelIds,
     required int channelLimit,
   }) {
-    if (channels.isEmpty || selectedChannelIds.isEmpty) {
-      return selectedChannelIds;
+    if (channels.isEmpty || channelLimit <= 0) {
+      return <String>{};
     }
-    if (channelLimit <= 0) {
+    if (selectedChannelIds.isEmpty) {
       return <String>{};
     }
     final available = channels.map((channel) => channel.id).toSet();

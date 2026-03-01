@@ -1,6 +1,7 @@
 """Unit tests for basic FastAPI behaviors and utilities."""
 
 import os
+from pathlib import Path
 import threading
 import unittest
 from unittest.mock import patch
@@ -10,7 +11,13 @@ from fastapi.testclient import TestClient
 os.environ.setdefault('BACKEND_REQUIRE_AUTH', 'false')
 
 import server.app as backend
-from server.app import _sanitize_max_chars, app, normalize_summary, trim_text
+from server.app import (
+    _build_transcript_cache_key,
+    _sanitize_max_chars,
+    app,
+    normalize_summary,
+    trim_text,
+)
 
 
 class AppTestCase(unittest.TestCase):
@@ -57,6 +64,83 @@ class AppTestCase(unittest.TestCase):
         summary = '• 첫 번째 줄\\n• 두 번째 줄\\n• 세 번째 줄'
         normalized = normalize_summary(summary, 2)
         self.assertEqual(normalized.splitlines(), ['첫 번째 줄', '두 번째 줄'])
+
+    def test_normalize_summary_strips_numeric_bullets(self) -> None:
+        """Numeric bullets and whitespace should be removed reliably."""
+        summary = '1. 첫 줄\n2. 둘째 줄\n3. 셋째 줄'
+        normalized = normalize_summary(summary, 2)
+        self.assertEqual(normalized.splitlines(), ['첫 줄', '둘째 줄'])
+
+    def test_transcript_cache_key_depends_on_request_shape(self) -> None:
+        """Cache key must vary by summary and max_chars options."""
+        base = _build_transcript_cache_key(
+            video_id='abc12345xyz',
+            max_chars=1200,
+            summarize=True,
+            summary_lines=3,
+        )
+        no_summary = _build_transcript_cache_key(
+            video_id='abc12345xyz',
+            max_chars=1200,
+            summarize=False,
+            summary_lines=3,
+        )
+        shorter = _build_transcript_cache_key(
+            video_id='abc12345xyz',
+            max_chars=800,
+            summarize=True,
+            summary_lines=3,
+        )
+        self.assertNotEqual(base, no_summary)
+        self.assertNotEqual(base, shorter)
+
+    def test_parse_json3_tolerates_non_dict_events(self) -> None:
+        """JSON3 parser should ignore malformed entries without raising."""
+        raw = (
+            '{"events":['
+            '{"segs":[{"utf8":"hello "},null,{"utf8":"world"}]},'
+            '"bad-event",'
+            '{"segs":"invalid"},'
+            '{"segs":[{"utf8":123},{"utf8":"!"}]}'
+            ']}'
+        )
+        parsed = backend.parse_json3(raw)
+        self.assertEqual(parsed, 'hello world!')
+
+    def test_download_audio_retry_success_returns_audio_path(self) -> None:
+        """Retry via chrome cookies should succeed instead of returning first error."""
+
+        class _FakeYoutubeDL:
+            attempts = 0
+
+            def __init__(self, opts):
+                self._opts = opts
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def extract_info(self, _url, download=False):
+                _FakeYoutubeDL.attempts += 1
+                if _FakeYoutubeDL.attempts == 1:
+                    raise backend.DownloadError('first attempt failed')
+                outtmpl = self._opts['outtmpl']
+                output_path = Path(outtmpl.replace('%(ext)s', 'm4a'))
+                output_path.write_text('audio', encoding='utf-8')
+                return {'id': 'abc12345xyz'}
+
+        with patch.object(backend, 'YTDLP_COOKIES_FROM_BROWSER', None):
+            with patch.object(backend, 'YTDLP_COOKIES_PATH', None):
+                with patch('server.app.YoutubeDL', _FakeYoutubeDL):
+                    audio_path, error = backend.download_audio('abc12345xyz')
+
+        self.assertIsNone(error)
+        self.assertIsNotNone(audio_path)
+        self.assertEqual(_FakeYoutubeDL.attempts, 2)
+        if audio_path is not None and os.path.exists(audio_path):
+            os.remove(audio_path)
 
     def test_selection_rejects_oversized_payload(self) -> None:
         """Selection payload size should be capped to prevent abuse."""

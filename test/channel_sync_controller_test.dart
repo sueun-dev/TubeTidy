@@ -78,6 +78,25 @@ void main() {
     expect(result, {'c1'});
   });
 
+  test('normalizeSelection clears stale selection when channels are empty', () {
+    final selectionService = _FakeSelectionService();
+    final controller = ChannelSyncController(
+      selectionService: selectionService,
+      youtubeApiFactory: (_) => _FakeYouTubeApi(
+        fetchSubscriptionsImpl: () async => <Channel>[],
+        fetchLatestVideosImpl: (_) async => <Video>[],
+      ),
+    );
+
+    final result = controller.normalizeSelection(
+      channels: const <Channel>[],
+      selectedChannelIds: const {'c1', 'c2'},
+      channelLimit: 3,
+    );
+
+    expect(result, isEmpty);
+  });
+
   test('fetchChannels retries once for auth error when interactive', () async {
     final selectionService = _FakeSelectionService();
     var attempts = 0;
