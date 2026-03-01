@@ -2,6 +2,7 @@
 
 from collections import deque
 from contextlib import asynccontextmanager, contextmanager
+import hashlib
 import html
 import json
 import os
@@ -103,6 +104,7 @@ FAIL_CLOSED_WITHOUT_DB = _env_flag(
     'FAIL_CLOSED_WITHOUT_DB',
     APP_ENV in {'prod', 'production'},
 )
+TRUST_PROXY_HEADERS = _env_flag('TRUST_PROXY_HEADERS', False)
 AUTH_CLOCK_SKEW_SECONDS = int(os.getenv('AUTH_CLOCK_SKEW_SECONDS', '120'))
 GOOGLE_JWKS_URL = os.getenv(
     'GOOGLE_JWKS_URL',
@@ -569,11 +571,12 @@ def _authorize_user(user_id: str, authorization: Optional[str]) -> str:
 
 
 def _resolve_client_id(request: Request) -> str:
-    forwarded = request.headers.get('x-forwarded-for', '')
-    if forwarded:
-        candidate = forwarded.split(',')[0].strip()
-        if candidate:
-            return candidate[:128]
+    if TRUST_PROXY_HEADERS:
+        forwarded = request.headers.get('x-forwarded-for', '')
+        if forwarded:
+            candidate = forwarded.split(',')[0].strip()
+            if candidate:
+                return candidate[:128]
     client = request.client.host if request.client else 'unknown'
     return (client or 'unknown')[:128]
 
@@ -934,8 +937,14 @@ def transcript(req: TranscriptRequest, request: Request):
     _enforce_transcript_rate_limit(_resolve_client_id(request))
     video_id = _sanitize_video_id(req.video_id)
     max_chars = _sanitize_max_chars(req.max_chars)
+    cache_key = _build_transcript_cache_key(
+        video_id=video_id,
+        max_chars=max_chars,
+        summarize=bool(req.summarize),
+        summary_lines=req.summary_lines,
+    )
 
-    cached = load_cache(video_id)
+    cached = load_cache(cache_key)
     if cached:
         return {**cached, 'cached': True}
 
@@ -952,7 +961,7 @@ def transcript(req: TranscriptRequest, request: Request):
                 summary_lines=req.summary_lines,
                 max_chars=max_chars,
             )
-            save_cache(video_id, payload)
+            save_cache(cache_key, payload)
             return {**payload, 'cached': False}
 
         if not OPENAI_API_KEY:
@@ -986,7 +995,7 @@ def transcript(req: TranscriptRequest, request: Request):
             summary_lines=req.summary_lines,
             max_chars=max_chars,
         )
-        save_cache(video_id, payload)
+        save_cache(cache_key, payload)
         return {**payload, 'cached': False}
 
 
@@ -1548,19 +1557,35 @@ def normalize_summary(summary: str, lines: int) -> str:
     ]
     cleaned_lines = []
     for line in raw_lines:
-        cleaned = re.sub(r'^[\\s•\\-\\d\\.]+', '', line).strip()
+        cleaned = re.sub(r'^[\s•\-\d\.]+', '', line).strip()
         if cleaned:
             cleaned_lines.append(cleaned)
 
     if len(cleaned_lines) >= lines:
         return '\n'.join(cleaned_lines[:lines])
 
-    sentence_parts = re.split(r'(?<=[.!?。])\\s+', normalized)
+    sentence_parts = re.split(r'(?<=[.!?。])\s+', normalized)
     sentence_parts = [part.strip() for part in sentence_parts if part.strip()]
     if len(sentence_parts) >= lines:
         return '\n'.join(sentence_parts[:lines])
 
     return normalized.strip()
+
+
+def _build_transcript_cache_key(
+    *,
+    video_id: str,
+    max_chars: int,
+    summarize: bool,
+    summary_lines: Optional[int],
+) -> str:
+    """Build a stable 32-char cache key per transcript request shape."""
+    normalized_lines = max(1, min(5, summary_lines or 3))
+    signature = (
+        f'video:{video_id}|chars:{max_chars}|'
+        f'summarize:{int(summarize)}|lines:{normalized_lines}'
+    )
+    return hashlib.sha256(signature.encode('utf-8')).hexdigest()[:32]
 
 
 def load_cache(video_id: str) -> Optional[dict]:
@@ -1972,12 +1997,20 @@ def parse_json3(raw: str) -> Optional[str]:
     except json.JSONDecodeError:
         return None
     events = data.get('events') or []
+    if not isinstance(events, list):
+        return None
     chunks = []
     for event in events:
-        segs = event.get('segs') or []
+        if not isinstance(event, dict):
+            continue
+        segs = event.get('segs')
+        if not isinstance(segs, list):
+            continue
         for seg in segs:
+            if not isinstance(seg, dict):
+                continue
             text = seg.get('utf8')
-            if text:
+            if isinstance(text, str) and text:
                 chunks.append(text)
     joined = ''.join(chunks)
     cleaned = re.sub(r'\s+', ' ', joined).strip()
@@ -2040,15 +2073,15 @@ def download_audio(video_id: str) -> tuple[Optional[str], Optional[str]]:
             with YoutubeDL(ydl_opts) as ydl:
                 ydl.extract_info(url, download=True)
         except DownloadError as error:
-            if not YTDLP_COOKIES_FROM_BROWSER:
-                try:
-                    with YoutubeDL(
-                        {**ydl_opts, 'cookiesfrombrowser': ('chrome',)}
-                    ) as ydl:
-                        ydl.extract_info(url, download=True)
-                except Exception as retry_error:
-                    return None, str(retry_error)
-            return None, str(error)
+            if YTDLP_COOKIES_FROM_BROWSER:
+                return None, str(error)
+            try:
+                with YoutubeDL(
+                    {**ydl_opts, 'cookiesfrombrowser': ('chrome',)}
+                ) as ydl:
+                    ydl.extract_info(url, download=True)
+            except Exception as retry_error:
+                return None, str(retry_error)
         except Exception as error:
             return None, str(error)
 
