@@ -1,5 +1,5 @@
 ## Thank You
-아이디어 및 A.I 아이디어 제공: **Yunjoo Cho**  
+Idea and A.I. concept by **Yunjoo Cho**  
 Contact: [rachelcyj99@gmail.com](mailto:rachelcyj99@gmail.com)
 
 # TubeTidy
