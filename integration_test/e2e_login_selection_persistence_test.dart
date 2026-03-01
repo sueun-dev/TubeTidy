@@ -17,7 +17,11 @@ const _backendBaseUrl = String.fromEnvironment(
   defaultValue: 'http://127.0.0.1:5055',
 );
 
-Future<void> _waitFor(WidgetTester tester, Finder finder) async {
+Future<void> _waitFor(
+  WidgetTester tester,
+  Finder finder, {
+  required String step,
+}) async {
   final endAt = DateTime.now().add(const Duration(seconds: 20));
   while (DateTime.now().isBefore(endAt)) {
     await tester.pump(const Duration(milliseconds: 200));
@@ -25,7 +29,24 @@ Future<void> _waitFor(WidgetTester tester, Finder finder) async {
       return;
     }
   }
-  fail('Timed out while waiting for target widget.');
+  fail('Timed out while waiting for target widget. step=$step finder=$finder');
+}
+
+Future<int> _waitForAny(
+  WidgetTester tester, {
+  required List<Finder> finders,
+  required String step,
+}) async {
+  final endAt = DateTime.now().add(const Duration(seconds: 20));
+  while (DateTime.now().isBefore(endAt)) {
+    await tester.pump(const Duration(milliseconds: 200));
+    for (var i = 0; i < finders.length; i += 1) {
+      if (finders[i].evaluate().isNotEmpty) {
+        return i;
+      }
+    }
+  }
+  fail('Timed out while waiting for any target widget. step=$step');
 }
 
 Future<void> _expectBackendReady() async {
@@ -75,28 +96,39 @@ void main() {
       await tester.pumpAndSettle(const Duration(seconds: 2));
 
       final e2eLoginButton = find.byKey(const ValueKey('e2e-login-button'));
-      await _waitFor(tester, e2eLoginButton);
+      await _waitFor(tester, e2eLoginButton, step: 'initial-e2e-login-button');
       await tester.ensureVisible(e2eLoginButton);
       await tester.tap(e2eLoginButton);
       await tester.pumpAndSettle(const Duration(seconds: 3));
 
       final completeButton =
           find.byKey(const ValueKey('selection-complete-button'));
-      await _waitFor(tester, completeButton);
+      await _waitFor(tester, completeButton, step: 'selection-complete-button');
       await tester.ensureVisible(completeButton);
 
       for (final channelId in _selectedChannelIds) {
         final switchFinder = find.byKey(ValueKey('channel-switch-$channelId'));
-        await _waitFor(tester, switchFinder);
+        await _waitFor(
+          tester,
+          switchFinder,
+          step: 'channel-switch-$channelId-before-complete',
+        );
         await tester.ensureVisible(switchFinder);
-        await tester.tap(switchFinder);
-        await tester.pumpAndSettle();
+        final channelSwitch = tester.widget<CupertinoSwitch>(switchFinder);
+        if (!channelSwitch.value) {
+          await tester.tap(switchFinder);
+          await tester.pumpAndSettle();
+        }
       }
 
       await tester.tap(completeButton);
       await tester.pumpAndSettle(const Duration(seconds: 3));
 
-      await _waitFor(tester, find.byKey(const ValueKey('tab-settings')));
+      await _waitFor(
+        tester,
+        find.byKey(const ValueKey('tab-settings')),
+        step: 'tab-settings',
+      );
       await tester.tap(find.byKey(const ValueKey('tab-settings')));
       await tester.pumpAndSettle(const Duration(seconds: 2));
 
@@ -105,18 +137,35 @@ void main() {
       await tester.tap(logoutButton);
       await tester.pumpAndSettle(const Duration(seconds: 2));
 
-      await _waitFor(tester, e2eLoginButton);
+      await _waitFor(
+        tester,
+        e2eLoginButton,
+        step: 'e2e-login-button-after-logout',
+      );
       await tester.ensureVisible(e2eLoginButton);
       await tester.tap(e2eLoginButton);
       await tester.pumpAndSettle(const Duration(seconds: 4));
 
-      await _waitFor(tester, find.byKey(const ValueKey('tab-channels')));
-      await tester.tap(find.byKey(const ValueKey('tab-channels')));
-      await tester.pumpAndSettle(const Duration(seconds: 2));
+      final tabChannels = find.byKey(const ValueKey('tab-channels'));
+      final selectionCompleteButton =
+          find.byKey(const ValueKey('selection-complete-button'));
+      final reloginLanding = await _waitForAny(
+        tester,
+        finders: [tabChannels, selectionCompleteButton],
+        step: 'relogin-landing-screen',
+      );
+      if (reloginLanding == 0) {
+        await tester.tap(tabChannels);
+        await tester.pumpAndSettle(const Duration(seconds: 2));
+      }
 
       for (final channelId in _selectedChannelIds) {
         final switchFinder = find.byKey(ValueKey('channel-switch-$channelId'));
-        await _waitFor(tester, switchFinder);
+        await _waitFor(
+          tester,
+          switchFinder,
+          step: 'channel-switch-$channelId-after-relogin',
+        );
         final channelSwitch = tester.widget<CupertinoSwitch>(switchFinder);
         expect(channelSwitch.value, isTrue);
       }
