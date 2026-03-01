@@ -1,3 +1,7 @@
+## Thank You
+아이디어 및 A.I 아이디어 제공: **Yunjoo Cho**  
+Contact: [rachelcyj99@gmail.com](mailto:rachelcyj99@gmail.com)
+
 # TubeTidy
 
 AI-powered YouTube summary app (Flutter) that syncs subscriptions, extracts captions/audio, and generates concise 3-line summaries on demand.
