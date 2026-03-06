@@ -195,11 +195,15 @@ class _Thumbnail extends StatelessWidget {
 
   final String thumbUrl;
   final String videoId;
+  static final RegExp _youtubeVideoIdPattern = RegExp(r'^[A-Za-z0-9_-]{11}$');
 
   String get resolvedUrl {
-    if (thumbUrl.isNotEmpty) return thumbUrl;
-    if (videoId.isNotEmpty) {
-      return 'https://i.ytimg.com/vi/$videoId/hqdefault.jpg';
+    final normalizedThumbUrl = thumbUrl.trim();
+    if (normalizedThumbUrl.isNotEmpty) return normalizedThumbUrl;
+
+    final normalizedVideoId = videoId.trim();
+    if (_youtubeVideoIdPattern.hasMatch(normalizedVideoId)) {
+      return 'https://i.ytimg.com/vi/$normalizedVideoId/hqdefault.jpg';
     }
     return '';
   }
@@ -207,20 +211,7 @@ class _Thumbnail extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final url = resolvedUrl;
-    final placeholder = Container(
-      width: 64,
-      height: 64,
-      decoration: BoxDecoration(
-        color: LiquidColors.glassDark,
-        borderRadius: BorderRadius.circular(LiquidRadius.md),
-      ),
-      alignment: Alignment.center,
-      child: const Icon(
-        CupertinoIcons.photo,
-        color: LiquidColors.textTertiary,
-        size: 24,
-      ),
-    );
+    final placeholder = _buildPlaceholder();
 
     if (url.isEmpty) {
       return placeholder;
@@ -238,6 +229,26 @@ class _Thumbnail extends StatelessWidget {
           if (progress == null) return child;
           return placeholder;
         },
+      ),
+    );
+  }
+
+  Widget _buildPlaceholder() {
+    return ClipRRect(
+      borderRadius: BorderRadius.circular(LiquidRadius.md),
+      child: Container(
+        width: 64,
+        height: 64,
+        decoration: BoxDecoration(
+          color: LiquidColors.glassDark,
+          borderRadius: BorderRadius.circular(LiquidRadius.md),
+        ),
+        alignment: Alignment.center,
+        child: const Icon(
+          CupertinoIcons.photo,
+          color: LiquidColors.textTertiary,
+          size: 24,
+        ),
       ),
     );
   }

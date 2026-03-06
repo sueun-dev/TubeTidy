@@ -3,6 +3,7 @@
 from collections import deque
 from contextlib import asynccontextmanager, contextmanager
 import hashlib
+import hmac
 import html
 import json
 import os
@@ -26,6 +27,10 @@ try:
     from sqlalchemy.dialects.postgresql import insert as pg_insert
 except Exception:  # pragma: no cover - fallback for non-Postgres builds.
     pg_insert = None
+try:
+    from sqlalchemy.dialects.sqlite import insert as sqlite_insert
+except Exception:  # pragma: no cover - fallback for non-SQLite builds.
+    sqlite_insert = None
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from yt_dlp import YoutubeDL
 from yt_dlp.utils import DownloadError
@@ -78,6 +83,10 @@ TRANSCRIPT_RATE_LIMIT_PER_WINDOW = int(
 TRANSCRIPT_RATE_LIMIT_WINDOW_SECONDS = int(
     os.getenv('TRANSCRIPT_RATE_LIMIT_WINDOW_SECONDS', '60')
 )
+YTDLP_SOCKET_TIMEOUT_SECONDS = max(
+    1,
+    int(os.getenv('YTDLP_SOCKET_TIMEOUT_SECONDS', '10')),
+)
 USER_AGENT = os.getenv(
     'YTDLP_USER_AGENT',
     'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) '
@@ -99,6 +108,11 @@ ALLOWED_ORIGINS = tuple(
 ALLOW_CREDENTIALS = '*' not in ALLOWED_ORIGINS
 APP_ENV = os.getenv('APP_ENV', 'development').strip().lower()
 BACKEND_REQUIRE_AUTH = _env_flag('BACKEND_REQUIRE_AUTH', True)
+ALLOW_CLIENT_PLAN_UPDATES = _env_flag(
+    'ALLOW_CLIENT_PLAN_UPDATES',
+    False,
+)
+PLAN_UPDATE_SHARED_SECRET = os.getenv('PLAN_UPDATE_SHARED_SECRET', '').strip()
 ENABLE_API_DOCS = _env_flag('ENABLE_API_DOCS', False)
 FAIL_CLOSED_WITHOUT_DB = _env_flag(
     'FAIL_CLOSED_WITHOUT_DB',
@@ -143,6 +157,13 @@ ARCHIVE_VIDEO_ID_PATTERN = re.compile(r'^[A-Za-z0-9_-]{6,64}$')
 USER_ID_PATTERN = re.compile(r'^[A-Za-z0-9._:-]{3,128}$')
 CHANNEL_ID_PATTERN = re.compile(r'^[A-Za-z0-9_-]{3,64}$')
 PLAN_TIER_PATTERN = re.compile(r'^(free|starter|growth|unlimited|lifetime)$')
+PLAN_CHANNEL_LIMITS: dict[str, Optional[int]] = {
+    'free': 3,
+    'starter': 10,
+    'growth': 50,
+    'unlimited': None,
+    'lifetime': None,
+}
 MAX_SELECTION_CHANNELS = int(os.getenv('MAX_SELECTION_CHANNELS', '200'))
 MAX_CHANNEL_TITLE_LENGTH = 255
 MAX_CHANNEL_THUMBNAIL_LENGTH = 2048
@@ -294,6 +315,12 @@ def _is_postgres_session(session: Any) -> bool:
     return getattr(dialect, 'name', '') == 'postgresql'
 
 
+def _is_sqlite_session(session: Any) -> bool:
+    bind = getattr(session, 'bind', None)
+    dialect = getattr(bind, 'dialect', None)
+    return getattr(dialect, 'name', '') == 'sqlite'
+
+
 def _sanitize_user_id(raw_user_id: str) -> str:
     user_id = raw_user_id.strip()
     if not user_id:
@@ -333,6 +360,28 @@ def _sanitize_plan_tier(raw_plan_tier: str) -> str:
     return plan_tier
 
 
+def _channel_limit_for_plan_tier(raw_plan_tier: Optional[str]) -> Optional[int]:
+    if not raw_plan_tier:
+        return PLAN_CHANNEL_LIMITS['free']
+    try:
+        plan_tier = _sanitize_plan_tier(raw_plan_tier)
+    except HTTPException:
+        plan_tier = 'free'
+    return PLAN_CHANNEL_LIMITS.get(plan_tier, PLAN_CHANNEL_LIMITS['free'])
+
+
+def _enforce_selection_plan_limit(
+    plan_tier: Optional[str],
+    selected_ids: list[str],
+) -> None:
+    limit = _channel_limit_for_plan_tier(plan_tier)
+    if limit is not None and len(selected_ids) > limit:
+        raise HTTPException(
+            status_code=403,
+            detail='selected channel limit exceeded for current plan',
+        )
+
+
 def _sanitize_selection_change_day(raw_day: Optional[int]) -> int:
     if raw_day is None:
         return 0
@@ -369,6 +418,31 @@ def _normalize_opened_video_ids(raw_ids: list[str]) -> list[str]:
         if len(normalized) >= MAX_OPENED_VIDEO_IDS:
             break
     return normalized
+
+
+def _sanitize_archive_title(raw_title: Optional[str]) -> Optional[str]:
+    if raw_title is None:
+        return None
+    title = raw_title.strip()[:MAX_CHANNEL_TITLE_LENGTH]
+    return title or None
+
+
+def _sanitize_archive_thumbnail_url(raw_url: Optional[str]) -> Optional[str]:
+    if raw_url is None:
+        return None
+    url = raw_url.strip()[:MAX_CHANNEL_THUMBNAIL_LENGTH]
+    return url or None
+
+
+def _sanitize_archive_channel_id(raw_channel_id: Optional[str]) -> Optional[str]:
+    if raw_channel_id is None:
+        return None
+    channel_id = raw_channel_id.strip()
+    if not channel_id:
+        return None
+    if not CHANNEL_ID_PATTERN.fullmatch(channel_id):
+        return None
+    return channel_id
 
 
 def _sanitize_email(raw_email: Optional[str]) -> Optional[str]:
@@ -570,6 +644,29 @@ def _authorize_user(user_id: str, authorization: Optional[str]) -> str:
     return normalized_user_id
 
 
+def _resolve_transcript_principal(
+    request: Request,
+    authorization: Optional[str],
+) -> str:
+    if not BACKEND_REQUIRE_AUTH:
+        return f'ip:{_resolve_client_id(request)}'
+    token = _extract_bearer_token(authorization)
+    user_id = _verify_google_user(token)
+    return f'user:{user_id}'
+
+
+def _has_trusted_plan_update_access(request: Request) -> bool:
+    if ALLOW_CLIENT_PLAN_UPDATES:
+        return True
+    if not PLAN_UPDATE_SHARED_SECRET:
+        return False
+    provided = request.headers.get('x-plan-update-token', '').strip()
+    return bool(provided) and hmac.compare_digest(
+        provided,
+        PLAN_UPDATE_SHARED_SECRET,
+    )
+
+
 def _resolve_client_id(request: Request) -> str:
     if TRUST_PROXY_HEADERS:
         forwarded = request.headers.get('x-forwarded-for', '')
@@ -667,6 +764,12 @@ class ArchiveToggleRequest(BaseModel):
     """Payload for toggling an archive entry."""
     user_id: str
     video_id: str
+    archived: Optional[bool] = None
+    title: Optional[str] = None
+    thumbnail_url: Optional[str] = None
+    channel_id: Optional[str] = None
+    channel_title: Optional[str] = None
+    channel_thumbnail_url: Optional[str] = None
 
 
 class ArchiveClearRequest(BaseModel):
@@ -790,6 +893,15 @@ def _ensure_user_exists(session: Any, user_id: str) -> None:
     if _is_postgres_session(session) and pg_insert is not None:
         stmt = (
             pg_insert(User.__table__)
+            .values(id=user_id, plan_tier='free')
+            .on_conflict_do_nothing(index_elements=['id'])
+        )
+        session.execute(stmt)
+        return
+
+    if _is_sqlite_session(session) and sqlite_insert is not None:
+        stmt = (
+            sqlite_insert(User.__table__)
             .values(id=user_id, plan_tier='free')
             .on_conflict_do_nothing(index_elements=['id'])
         )
@@ -931,10 +1043,193 @@ def _sync_user_channel_links(
         existing_link.synced_at = now
 
 
+def _build_archive_metadata(
+    req: ArchiveToggleRequest,
+) -> dict[str, Optional[str]]:
+    return {
+        'title': _sanitize_archive_title(req.title),
+        'thumbnail_url': _sanitize_archive_thumbnail_url(req.thumbnail_url),
+        'channel_id': _sanitize_archive_channel_id(req.channel_id),
+        'channel_title': _sanitize_archive_title(req.channel_title),
+        'channel_thumbnail_url': _sanitize_archive_thumbnail_url(
+            req.channel_thumbnail_url
+        ),
+    }
+
+
+def _upsert_archive_video(
+    session: Any,
+    video_id: str,
+    metadata: dict[str, Optional[str]],
+) -> None:
+    video = session.query(Video).filter(Video.id == video_id).first()
+    channel_id = (
+        metadata['channel_id']
+        or (video.channel_id if video is not None else None)
+        or ARCHIVE_PLACEHOLDER_CHANNEL_ID
+    )
+    channel = session.query(Channel).filter(Channel.id == channel_id).first()
+    if channel is None:
+        session.add(
+            Channel(
+                id=channel_id,
+                youtube_channel_id=channel_id,
+                title=metadata['channel_title'] or ARCHIVE_PLACEHOLDER_CHANNEL_TITLE,
+                thumbnail_url=metadata['channel_thumbnail_url'],
+            )
+        )
+        session.flush()
+    else:
+        if metadata['channel_title'] is not None:
+            channel.title = metadata['channel_title']
+        elif not channel.title:
+            channel.title = ARCHIVE_PLACEHOLDER_CHANNEL_TITLE
+        if metadata['channel_thumbnail_url'] is not None:
+            channel.thumbnail_url = metadata['channel_thumbnail_url']
+
+    if video is None:
+        session.add(
+            Video(
+                id=video_id,
+                youtube_id=video_id[:32],
+                channel_id=channel_id,
+                title=metadata['title'] or ARCHIVE_PLACEHOLDER_VIDEO_TITLE,
+                thumbnail_url=metadata['thumbnail_url'],
+                published_at=None,
+            )
+        )
+        session.flush()
+        return
+
+    video.channel_id = channel_id
+    if metadata['title'] is not None:
+        video.title = metadata['title']
+    elif not video.title:
+        video.title = ARCHIVE_PLACEHOLDER_VIDEO_TITLE
+    if metadata['thumbnail_url'] is not None:
+        video.thumbnail_url = metadata['thumbnail_url']
+
+
+def _serialize_archive_items(session: Any, archives: list[Archive]) -> list[dict[str, Any]]:
+    if not archives:
+        return []
+
+    video_ids = [item.video_id for item in archives]
+    videos = (
+        session.query(Video)
+        .filter(Video.id.in_(video_ids))
+        .all()
+    )
+    videos_by_id = {video.id: video for video in videos}
+    channel_ids = {
+        video.channel_id
+        for video in videos
+        if video.channel_id
+    }
+    channels = (
+        session.query(Channel)
+        .filter(Channel.id.in_(list(channel_ids)))
+        .all()
+        if channel_ids
+        else []
+    )
+    channels_by_id = {channel.id: channel for channel in channels}
+
+    items = []
+    for archived in archives:
+        video = videos_by_id.get(archived.video_id)
+        channel = channels_by_id.get(video.channel_id) if video else None
+        items.append(
+            {
+                'video_id': archived.video_id,
+                'archived_at': int(archived.archived_at.timestamp() * 1000),
+                'title': video.title if video else ARCHIVE_PLACEHOLDER_VIDEO_TITLE,
+                'thumbnail_url': video.thumbnail_url if video else None,
+                'channel_id': video.channel_id if video else ARCHIVE_PLACEHOLDER_CHANNEL_ID,
+                'channel_title': (
+                    channel.title if channel else ARCHIVE_PLACEHOLDER_CHANNEL_TITLE
+                ),
+                'channel_thumbnail_url': channel.thumbnail_url if channel else None,
+            }
+        )
+    return items
+
+
+def _upsert_user_state_row(
+    session: Any,
+    user_id: str,
+    *,
+    selection_change_day: int,
+    selection_changes_today: int,
+    opened_video_ids: list[str],
+) -> None:
+    now = datetime.now(timezone.utc)
+    payload = {
+        'user_id': user_id,
+        'selection_change_day': selection_change_day,
+        'selection_changes_today': selection_changes_today,
+        'opened_video_ids': json.dumps(opened_video_ids),
+        'updated_at': now,
+    }
+
+    if _is_postgres_session(session) and pg_insert is not None:
+        stmt = (
+            pg_insert(UserState.__table__)
+            .values(**payload)
+            .on_conflict_do_update(
+                index_elements=['user_id'],
+                set_={
+                    'selection_change_day': selection_change_day,
+                    'selection_changes_today': selection_changes_today,
+                    'opened_video_ids': json.dumps(opened_video_ids),
+                    'updated_at': now,
+                },
+            )
+        )
+        session.execute(stmt)
+        return
+
+    if _is_sqlite_session(session) and sqlite_insert is not None:
+        stmt = (
+            sqlite_insert(UserState.__table__)
+            .values(**payload)
+            .on_conflict_do_update(
+                index_elements=['user_id'],
+                set_={
+                    'selection_change_day': selection_change_day,
+                    'selection_changes_today': selection_changes_today,
+                    'opened_video_ids': json.dumps(opened_video_ids),
+                    'updated_at': now,
+                },
+            )
+        )
+        session.execute(stmt)
+        return
+
+    state = (
+        session.query(UserState)
+        .filter(UserState.user_id == user_id)
+        .first()
+    )
+    if state is None:
+        state = UserState(user_id=user_id)
+
+    state.selection_change_day = selection_change_day
+    state.selection_changes_today = selection_changes_today
+    state.opened_video_ids = json.dumps(opened_video_ids)
+    state.updated_at = now
+    session.add(state)
+
+
 @app.post('/transcript')
-def transcript(req: TranscriptRequest, request: Request):
+def transcript(
+    req: TranscriptRequest,
+    request: Request,
+    authorization: Optional[str] = Header(default=None),
+):
     """Return transcript and summary for a YouTube video."""
-    _enforce_transcript_rate_limit(_resolve_client_id(request))
+    principal = _resolve_transcript_principal(request, authorization)
+    _enforce_transcript_rate_limit(principal)
     video_id = _sanitize_video_id(req.video_id)
     max_chars = _sanitize_max_chars(req.max_chars)
     cache_key = _build_transcript_cache_key(
@@ -1013,23 +1308,13 @@ def list_archives(
             with get_session() as session:
                 if session is None:
                     _raise_db_unavailable()
-                items = (
+                archives = (
                     session.query(Archive)
                     .filter(Archive.user_id == user_id)
                     .order_by(Archive.archived_at.desc())
                     .all()
                 )
-                return {
-                    'items': [
-                        {
-                            'video_id': item.video_id,
-                            'archived_at': int(
-                                item.archived_at.timestamp() * 1000
-                            ),
-                        }
-                        for item in items
-                    ]
-                }
+                return {'items': _serialize_archive_items(session, archives)}
         except SQLAlchemyError as exc:
             if FAIL_CLOSED_WITHOUT_DB:
                 raise HTTPException(
@@ -1048,10 +1333,11 @@ def toggle_archive(
     request: Request,
     authorization: Optional[str] = Header(default=None),
 ):
-    """Toggle archive status for a video."""
+    """Set or toggle archive status for a video."""
     user_id = _authorize_user(req.user_id, authorization)
     _enforce_write_rate_limit(request, user_id)
     video_id = _sanitize_archive_video_id(req.video_id)
+    metadata = _build_archive_metadata(req)
     _require_database_for_write()
 
     if is_db_enabled():
@@ -1059,10 +1345,7 @@ def toggle_archive(
             with get_session() as session:
                 if session is None:
                     _raise_db_unavailable()
-                user = session.query(User).filter(User.id == user_id).first()
-                if user is None:
-                    session.add(User(id=user_id, plan_tier='free'))
-                    session.flush()
+                _ensure_user_exists(session, user_id)
                 existing = (
                     session.query(Archive)
                     .filter(
@@ -1071,19 +1354,107 @@ def toggle_archive(
                     )
                     .first()
                 )
-                if existing:
-                    session.delete(existing)
-                    session.commit()
-                    return {'archived': False}
-                _ensure_archive_video(session, video_id)
-                archived = Archive(user_id=user_id, video_id=video_id)
-                session.add(archived)
+                should_archive = (
+                    req.archived if req.archived is not None else existing is None
+                )
+                if not should_archive:
+                    if existing:
+                        session.delete(existing)
+                        session.commit()
+                    else:
+                        session.commit()
+                    return {'archived': False, 'video_id': video_id}
+
+                _upsert_archive_video(session, video_id, metadata)
+                if existing is None:
+                    existing = Archive(user_id=user_id, video_id=video_id)
+                    session.add(existing)
+                session.flush()
+                video = session.query(Video).filter(Video.id == video_id).first()
+                channel = (
+                    session.query(Channel)
+                    .filter(Channel.id == video.channel_id)
+                    .first()
+                    if video is not None
+                    else None
+                )
                 session.commit()
                 return {
                     'archived': True,
-                    'archived_at': int(archived.archived_at.timestamp() * 1000),
+                    'video_id': video_id,
+                    'archived_at': int(existing.archived_at.timestamp() * 1000),
+                    'title': video.title if video is not None else ARCHIVE_PLACEHOLDER_VIDEO_TITLE,
+                    'thumbnail_url': (
+                        video.thumbnail_url if video is not None else None
+                    ),
+                    'channel_id': (
+                        video.channel_id
+                        if video is not None
+                        else ARCHIVE_PLACEHOLDER_CHANNEL_ID
+                    ),
+                    'channel_title': (
+                        channel.title
+                        if channel is not None
+                        else ARCHIVE_PLACEHOLDER_CHANNEL_TITLE
+                    ),
+                    'channel_thumbnail_url': (
+                        channel.thumbnail_url if channel is not None else None
+                    ),
                 }
         except IntegrityError as exc:
+            if req.archived is True:
+                try:
+                    with get_session() as session:
+                        session = _require_session(session)
+                        existing = (
+                            session.query(Archive)
+                            .filter(
+                                Archive.user_id == user_id,
+                                Archive.video_id == video_id,
+                            )
+                            .first()
+                        )
+                        if existing is not None:
+                            video = (
+                                session.query(Video)
+                                .filter(Video.id == video_id)
+                                .first()
+                            )
+                            channel = (
+                                session.query(Channel)
+                                .filter(Channel.id == video.channel_id)
+                                .first()
+                                if video is not None
+                                else None
+                            )
+                            return {
+                                'archived': True,
+                                'video_id': video_id,
+                                'archived_at': int(existing.archived_at.timestamp() * 1000),
+                                'title': video.title if video else metadata['title'],
+                                'thumbnail_url': (
+                                    video.thumbnail_url
+                                    if video is not None
+                                    else metadata['thumbnail_url']
+                                ),
+                                'channel_id': (
+                                    video.channel_id
+                                    if video is not None
+                                    else metadata['channel_id']
+                                ),
+                                'channel_title': (
+                                    channel.title
+                                    if channel is not None
+                                    else metadata['channel_title']
+                                ),
+                                'channel_thumbnail_url': (
+                                    channel.thumbnail_url
+                                    if channel is not None
+                                    else metadata['channel_thumbnail_url']
+                                ),
+                            }
+                except SQLAlchemyError:
+                    pass
             raise HTTPException(
                 status_code=409, detail='archive conflict'
             ) from exc
@@ -1099,7 +1470,7 @@ def toggle_archive(
 
     if not _allow_file_fallback():
         raise HTTPException(status_code=503, detail='database required')
-    return _toggle_archive_file(user_id, video_id)
+    return _toggle_archive_file(user_id, video_id, metadata, req.archived)
 
 
 @app.post('/archives/clear')
@@ -1149,13 +1520,12 @@ def upsert_user(
     user_id = _authorize_user(req.user_id, authorization)
     _enforce_write_rate_limit(request, user_id)
     email = _sanitize_email(req.email)
-    plan_tier = _sanitize_plan_tier(req.plan_tier) if req.plan_tier else None
     _require_database_for_write()
     if not is_db_enabled():
         return {
             'user_id': user_id,
             'email': email,
-            'plan_tier': plan_tier or 'free',
+            'plan_tier': 'free',
         }
     try:
         with get_session() as session:
@@ -1166,13 +1536,11 @@ def upsert_user(
                 user = User(
                     id=user_id,
                     email=email,
-                    plan_tier=plan_tier or 'free',
+                    plan_tier='free',
                 )
                 session.add(user)
             else:
                 user.email = email
-                if plan_tier is not None:
-                    user.plan_tier = plan_tier
             session.commit()
             return {
                 'user_id': user.id,
@@ -1228,6 +1596,11 @@ def update_user_plan(
 ):
     """Update or create the user's plan tier."""
     user_id = _authorize_user(req.user_id, authorization)
+    if not _has_trusted_plan_update_access(request):
+        raise HTTPException(
+            status_code=403,
+            detail='plan updates require trusted server credentials',
+        )
     _enforce_write_rate_limit(request, user_id)
     plan_tier = _sanitize_plan_tier(req.plan_tier)
     _require_database_for_write()
@@ -1334,25 +1707,14 @@ def upsert_user_state(
         with get_session() as session:
             if session is None:
                 _raise_db_unavailable()
-            user = session.query(User).filter(User.id == user_id).first()
-            if user is None:
-                user = User(id=user_id, plan_tier='free')
-                session.add(user)
-                session.flush()
-
-            state = (
-                session.query(UserState)
-                .filter(UserState.user_id == user_id)
-                .first()
+            _ensure_user_exists(session, user_id)
+            _upsert_user_state_row(
+                session,
+                user_id,
+                selection_change_day=selection_change_day,
+                selection_changes_today=selection_changes_today,
+                opened_video_ids=opened_video_ids,
             )
-            if state is None:
-                state = UserState(user_id=user_id)
-
-            state.selection_change_day = selection_change_day
-            state.selection_changes_today = selection_changes_today
-            state.opened_video_ids = json.dumps(opened_video_ids)
-            state.updated_at = datetime.now(timezone.utc)
-            session.add(state)
             session.commit()
             return payload
     except SQLAlchemyError as exc:
@@ -1378,15 +1740,27 @@ def get_selection(
     try:
         with get_session() as session:
             session = _require_session(session)
+            user = session.query(User).filter(User.id == user_id).first()
             rows = (
                 session.query(UserChannel)
                 .filter(
                     UserChannel.user_id == user_id,
                     UserChannel.is_selected.is_(True),
                 )
+                .order_by(UserChannel.channel_id.asc())
                 .all()
             )
-            return {'selected_ids': [row.channel_id for row in rows]}
+            selected_ids = [row.channel_id for row in rows]
+            limit = _channel_limit_for_plan_tier(
+                user.plan_tier if user is not None else 'free'
+            )
+            if limit is not None and len(selected_ids) > limit:
+                for row in rows[limit:]:
+                    row.is_selected = False
+                    session.add(row)
+                session.commit()
+                selected_ids = selected_ids[:limit]
+            return {'selected_ids': selected_ids}
     except SQLAlchemyError as exc:
         raise HTTPException(
             status_code=500, detail='selection fetch failed'
@@ -1405,11 +1779,17 @@ def save_selection(
     normalized_channels, selected_ids_sorted = _normalize_selection_request(req)
     _require_database_for_write()
     if not is_db_enabled():
+        _enforce_selection_plan_limit('free', selected_ids_sorted)
         return {'selected_ids': selected_ids_sorted}
     try:
         with get_session() as session:
             session = _require_session(session)
             _ensure_user_exists(session, user_id)
+            user = session.query(User).filter(User.id == user_id).first()
+            _enforce_selection_plan_limit(
+                user.plan_tier if user is not None else 'free',
+                selected_ids_sorted,
+            )
             _upsert_channels(session, normalized_channels)
             _sync_user_channel_links(session, user_id, selected_ids_sorted)
 
@@ -1428,38 +1808,6 @@ def save_selection(
         raise HTTPException(
             status_code=500, detail='selection save failed'
         ) from exc
-
-
-def _ensure_archive_video(session, video_id: str) -> None:
-    """Create placeholder channel/video rows for archive foreign keys."""
-    channel = (
-        session.query(Channel)
-        .filter(Channel.id == ARCHIVE_PLACEHOLDER_CHANNEL_ID)
-        .first()
-    )
-    if channel is None:
-        session.add(
-            Channel(
-                id=ARCHIVE_PLACEHOLDER_CHANNEL_ID,
-                youtube_channel_id=ARCHIVE_PLACEHOLDER_CHANNEL_ID,
-                title=ARCHIVE_PLACEHOLDER_CHANNEL_TITLE,
-                thumbnail_url=None,
-            )
-        )
-        session.flush()
-
-    existing_video = session.query(Video).filter(Video.id == video_id).first()
-    if existing_video is None:
-        session.add(
-            Video(
-                id=video_id,
-                youtube_id=video_id[:32],
-                channel_id=ARCHIVE_PLACEHOLDER_CHANNEL_ID,
-                title=ARCHIVE_PLACEHOLDER_VIDEO_TITLE,
-                published_at=None,
-            )
-        )
-        session.flush()
 
 
 def _sanitize_max_chars(max_chars: Optional[int]) -> int:
@@ -1735,7 +2083,17 @@ def _load_archives_file(user_id: str) -> list[dict]:
         video_id = entry.get('video_id')
         archived_at = entry.get('archived_at')
         if isinstance(video_id, str) and isinstance(archived_at, int):
-            items.append({'video_id': video_id, 'archived_at': archived_at})
+            items.append(
+                {
+                    'video_id': video_id,
+                    'archived_at': archived_at,
+                    'title': entry.get('title'),
+                    'thumbnail_url': entry.get('thumbnail_url'),
+                    'channel_id': entry.get('channel_id'),
+                    'channel_title': entry.get('channel_title'),
+                    'channel_thumbnail_url': entry.get('channel_thumbnail_url'),
+                }
+            )
     return items
 
 
@@ -1747,17 +2105,86 @@ def _save_archives_file(user_id: str, items: list[dict]) -> None:
         pass
 
 
-def _toggle_archive_file(user_id: str, video_id: str) -> dict:
+def _toggle_archive_file(
+    user_id: str,
+    video_id: str,
+    metadata: dict[str, Optional[str]],
+    archived: Optional[bool],
+) -> dict:
     items = _load_archives_file(user_id)
-    for idx, entry in enumerate(items):
-        if entry.get('video_id') == video_id:
-            items.pop(idx)
+    existing_index = next(
+        (
+            idx
+            for idx, entry in enumerate(items)
+            if entry.get('video_id') == video_id
+        ),
+        None,
+    )
+    should_archive = archived if archived is not None else existing_index is None
+    if not should_archive:
+        if existing_index is not None:
+            items.pop(existing_index)
             _save_archives_file(user_id, items)
-            return {'archived': False}
+        return {'archived': False, 'video_id': video_id}
+
+    if existing_index is not None:
+        existing_entry = items[existing_index]
+        archived_at = existing_entry.get('archived_at')
+        if not isinstance(archived_at, int):
+            archived_at = int(time.time() * 1000)
+        items[existing_index] = {
+            'video_id': video_id,
+            'archived_at': archived_at,
+            'title': metadata['title'] or existing_entry.get('title'),
+            'thumbnail_url': (
+                metadata['thumbnail_url'] or existing_entry.get('thumbnail_url')
+            ),
+            'channel_id': metadata['channel_id'] or existing_entry.get('channel_id'),
+            'channel_title': (
+                metadata['channel_title'] or existing_entry.get('channel_title')
+            ),
+            'channel_thumbnail_url': (
+                metadata['channel_thumbnail_url']
+                or existing_entry.get('channel_thumbnail_url')
+            ),
+        }
+        _save_archives_file(user_id, items)
+        return {
+            'archived': True,
+            'video_id': video_id,
+            'archived_at': archived_at,
+            'title': items[existing_index].get('title'),
+            'thumbnail_url': items[existing_index].get('thumbnail_url'),
+            'channel_id': items[existing_index].get('channel_id'),
+            'channel_title': items[existing_index].get('channel_title'),
+            'channel_thumbnail_url': items[existing_index].get(
+                'channel_thumbnail_url'
+            ),
+        }
+
     archived_at = int(time.time() * 1000)
-    items.append({'video_id': video_id, 'archived_at': archived_at})
+    items.append(
+        {
+            'video_id': video_id,
+            'archived_at': archived_at,
+            'title': metadata['title'],
+            'thumbnail_url': metadata['thumbnail_url'],
+            'channel_id': metadata['channel_id'],
+            'channel_title': metadata['channel_title'],
+            'channel_thumbnail_url': metadata['channel_thumbnail_url'],
+        }
+    )
     _save_archives_file(user_id, items)
-    return {'archived': True, 'archived_at': archived_at}
+    return {
+        'archived': True,
+        'video_id': video_id,
+        'archived_at': archived_at,
+        'title': metadata['title'],
+        'thumbnail_url': metadata['thumbnail_url'],
+        'channel_id': metadata['channel_id'],
+        'channel_title': metadata['channel_title'],
+        'channel_thumbnail_url': metadata['channel_thumbnail_url'],
+    }
 
 
 def fetch_caption_text(video_id: str) -> Optional[str]:
@@ -1815,6 +2242,7 @@ def fetch_ytdlp_info(
         'writeautomaticsub': True,
         'subtitleslangs': ['ko', 'en'],
         'geo_bypass': True,
+        'socket_timeout': YTDLP_SOCKET_TIMEOUT_SECONDS,
         'extractor_args': {
             'youtube': {
                 'player_client': list(YTDLP_PLAYER_CLIENT_LIST)
@@ -2058,6 +2486,7 @@ def download_audio(video_id: str) -> tuple[Optional[str], Optional[str]]:
             'quiet': True,
             'noplaylist': True,
             'geo_bypass': True,
+            'socket_timeout': YTDLP_SOCKET_TIMEOUT_SECONDS,
             'extractor_args': {
                 'youtube': {
                     'player_client': list(YTDLP_PLAYER_CLIENT_LIST)

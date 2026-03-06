@@ -5,11 +5,36 @@ import 'package:http/http.dart' as http;
 import '../models/archive.dart';
 import 'backend_api.dart';
 
+class ArchiveMutationRequest {
+  const ArchiveMutationRequest({
+    required this.videoId,
+    required this.archived,
+    this.title,
+    this.thumbnailUrl,
+    this.channelId,
+    this.channelTitle,
+    this.channelThumbnailUrl,
+  });
+
+  final String videoId;
+  final bool archived;
+  final String? title;
+  final String? thumbnailUrl;
+  final String? channelId;
+  final String? channelTitle;
+  final String? channelThumbnailUrl;
+}
+
 class ArchiveToggleResult {
-  const ArchiveToggleResult({required this.archived, this.archivedAt});
+  const ArchiveToggleResult({
+    required this.archived,
+    this.archivedAt,
+    this.entry,
+  });
 
   final bool archived;
   final DateTime? archivedAt;
+  final ArchiveEntry? entry;
 }
 
 class ArchiveService {
@@ -42,6 +67,11 @@ class ArchiveService {
           ArchiveEntry(
             videoId: videoId,
             archivedAt: DateTime.fromMillisecondsSinceEpoch(millis),
+            title: item['title'] as String?,
+            thumbnailUrl: item['thumbnail_url'] as String?,
+            channelId: item['channel_id'] as String?,
+            channelTitle: item['channel_title'] as String?,
+            channelThumbnailUrl: item['channel_thumbnail_url'] as String?,
           ),
         );
       }
@@ -51,18 +81,27 @@ class ArchiveService {
     }
   }
 
-  static Future<ArchiveToggleResult?> toggleArchive(
-    String userId,
-    String videoId,
-  ) async {
-    if (userId.isEmpty || videoId.isEmpty) return null;
+  static Future<ArchiveToggleResult?> toggleArchive({
+    required String userId,
+    required ArchiveMutationRequest request,
+  }) async {
+    if (userId.isEmpty || request.videoId.isEmpty) return null;
     final uri = BackendApi.uri('/archives/toggle');
     try {
       final response = await http
           .post(
             uri,
             headers: BackendApi.headers(),
-            body: jsonEncode({'user_id': userId, 'video_id': videoId}),
+            body: jsonEncode({
+              'user_id': userId,
+              'video_id': request.videoId,
+              'archived': request.archived,
+              'title': request.title,
+              'thumbnail_url': request.thumbnailUrl,
+              'channel_id': request.channelId,
+              'channel_title': request.channelTitle,
+              'channel_thumbnail_url': request.channelThumbnailUrl,
+            }),
           )
           .timeout(_timeout);
       if (response.statusCode != 200) return null;
@@ -78,7 +117,24 @@ class ArchiveService {
           parsed = DateTime.fromMillisecondsSinceEpoch(millis);
         }
       }
-      return ArchiveToggleResult(archived: archived, archivedAt: parsed);
+      ArchiveEntry? entry;
+      final entryVideoId = data['video_id'] as String?;
+      if (entryVideoId != null && parsed != null) {
+        entry = ArchiveEntry(
+          videoId: entryVideoId,
+          archivedAt: parsed,
+          title: data['title'] as String?,
+          thumbnailUrl: data['thumbnail_url'] as String?,
+          channelId: data['channel_id'] as String?,
+          channelTitle: data['channel_title'] as String?,
+          channelThumbnailUrl: data['channel_thumbnail_url'] as String?,
+        );
+      }
+      return ArchiveToggleResult(
+        archived: archived,
+        archivedAt: parsed,
+        entry: entry,
+      );
     } catch (_) {
       return null;
     }

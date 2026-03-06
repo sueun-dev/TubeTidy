@@ -91,6 +91,7 @@ class Video(Base):
         String(64), ForeignKey('channels.id')
     )
     title: Mapped[str] = mapped_column(String(255))
+    thumbnail_url: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     published_at: Mapped[Optional[datetime]] = mapped_column(
         DateTime(timezone=True), nullable=True
     )

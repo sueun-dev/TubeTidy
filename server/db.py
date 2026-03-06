@@ -7,7 +7,7 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
-from sqlalchemy import create_engine, text
+from sqlalchemy import create_engine, inspect, text
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.exc import SQLAlchemyError
 
@@ -140,8 +140,21 @@ def _apply_runtime_migrations() -> None:
         with _ENGINE.begin() as conn:
             for statement in statements:
                 conn.execute(text(statement))
+            _ensure_optional_columns(conn)
     except SQLAlchemyError:
         logging.exception('Runtime migration failed.')
+
+
+def _ensure_optional_columns(conn) -> None:
+    """Add columns introduced after initial release when they are missing."""
+    inspector = inspect(conn)
+    table_columns = {
+        table_name: {column['name'] for column in inspector.get_columns(table_name)}
+        for table_name in inspector.get_table_names()
+    }
+
+    if 'videos' in table_columns and 'thumbnail_url' not in table_columns['videos']:
+        conn.execute(text('ALTER TABLE videos ADD COLUMN thumbnail_url TEXT'))
 
 
 @contextmanager

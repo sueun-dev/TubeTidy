@@ -12,6 +12,7 @@ import '../models/transcript.dart';
 import '../models/user.dart';
 import '../models/video.dart';
 import '../services/app_services.dart';
+import '../services/archive_service.dart';
 import '../services/selection_change_cache.dart';
 import '../services/user_state_service.dart';
 import 'auth_session_controller.dart';
@@ -36,6 +37,7 @@ class AppStateData {
     this.transcriptQueued = const <String>{},
     this.openedVideoIds = const <String>{},
     this.archives = const <ArchiveEntry>[],
+    this.archivePendingVideoIds = const <String>{},
     this.selectionChangeDay = 0,
     this.selectionChangesToday = 0,
     this.selectionChangePending = false,
@@ -56,6 +58,7 @@ class AppStateData {
   final Set<String> transcriptQueued;
   final Set<String> openedVideoIds;
   final List<ArchiveEntry> archives;
+  final Set<String> archivePendingVideoIds;
   final int selectionChangeDay;
   final int selectionChangesToday;
   final bool selectionChangePending;
@@ -105,6 +108,7 @@ class AppStateData {
     Set<String>? transcriptQueued,
     Set<String>? openedVideoIds,
     List<ArchiveEntry>? archives,
+    Set<String>? archivePendingVideoIds,
     int? selectionChangeDay,
     int? selectionChangesToday,
     bool? selectionChangePending,
@@ -127,6 +131,8 @@ class AppStateData {
       transcriptQueued: transcriptQueued ?? this.transcriptQueued,
       openedVideoIds: openedVideoIds ?? this.openedVideoIds,
       archives: archives ?? this.archives,
+      archivePendingVideoIds:
+          archivePendingVideoIds ?? this.archivePendingVideoIds,
       selectionChangeDay: selectionChangeDay ?? this.selectionChangeDay,
       selectionChangesToday:
           selectionChangesToday ?? this.selectionChangesToday,
@@ -140,6 +146,17 @@ class AppStateData {
           : dailySwapRemovedId as String?,
     );
   }
+}
+
+@immutable
+class _AsyncStateContext {
+  const _AsyncStateContext({
+    required this.userId,
+    required this.authRevision,
+  });
+
+  final String? userId;
+  final int authRevision;
 }
 
 final appControllerProvider =
@@ -241,6 +258,45 @@ class AppController extends StateNotifier<AppStateData> {
 
   void _clearAuthSession() {
     _authSession.clearSession();
+  }
+
+  _AsyncStateContext _captureAsyncContext({String? userId}) {
+    return _AsyncStateContext(
+      userId: userId ?? state.user?.id,
+      authRevision: _authSession.revision,
+    );
+  }
+
+  bool _canApplyAsyncContext(_AsyncStateContext context) {
+    if (!mounted) return false;
+    if (state.user?.id != context.userId) return false;
+    return _authSession.revision == context.authRevision;
+  }
+
+  ArchiveEntry _buildArchiveEntry(
+    Video video,
+    Channel channel, {
+    required DateTime archivedAt,
+  }) {
+    return ArchiveEntry(
+      videoId: video.id,
+      archivedAt: archivedAt,
+      title: video.title,
+      thumbnailUrl: video.thumbnailUrl,
+      channelId: channel.id,
+      channelTitle: channel.title,
+      channelThumbnailUrl: channel.thumbnailUrl,
+    );
+  }
+
+  void _clearLoadedVideoContent() {
+    state = state.copyWith(
+      videos: const <Video>[],
+      transcripts: const <String, TranscriptResult>{},
+      transcriptLoading: const <String>{},
+      transcriptQueued: const <String>{},
+    );
+    _transcriptQueueController.reset();
   }
 
   Map<String, String> _currentAuthHeaders() {
@@ -429,40 +485,81 @@ class AppController extends StateNotifier<AppStateData> {
     }
   }
 
-  Future<void> toggleArchive(String videoId) async {
+  Future<void> toggleArchive(Video video, Channel channel) async {
+    if (state.archivePendingVideoIds.contains(video.id)) {
+      return;
+    }
+
+    final userId = state.user?.id;
+    if (userId == null) {
+      _setToast('먼저 로그인해주세요.');
+      return;
+    }
+
+    final context = _captureAsyncContext(userId: userId);
     final previous = List<ArchiveEntry>.from(state.archives);
     final archives = List<ArchiveEntry>.from(previous);
     final existingIndex =
-        archives.indexWhere((entry) => entry.videoId == videoId);
+        archives.indexWhere((entry) => entry.videoId == video.id);
     final willArchive = existingIndex < 0;
     if (existingIndex >= 0) {
       archives.removeAt(existingIndex);
     } else {
-      archives.add(ArchiveEntry(videoId: videoId, archivedAt: _now()));
+      archives.add(
+        _buildArchiveEntry(video, channel, archivedAt: _now()),
+      );
     }
-    state = state.copyWith(archives: List.unmodifiable(archives));
+    final pending = Set<String>.from(state.archivePendingVideoIds)
+      ..add(video.id);
+    state = state.copyWith(
+      archives: List.unmodifiable(archives),
+      archivePendingVideoIds: Set.unmodifiable(pending),
+    );
 
-    final userId = state.user?.id;
-    if (userId == null) return;
-    final result =
-        await _services.archiveService.toggleArchive(userId, videoId);
+    final result = await _services.archiveService.toggleArchive(
+      userId: userId,
+      request: ArchiveMutationRequest(
+        videoId: video.id,
+        archived: willArchive,
+        title: video.title,
+        thumbnailUrl: video.thumbnailUrl,
+        channelId: channel.id,
+        channelTitle: channel.title,
+        channelThumbnailUrl: channel.thumbnailUrl,
+      ),
+    );
+    if (!_canApplyAsyncContext(context)) {
+      return;
+    }
+
+    final updatedPending = Set<String>.from(state.archivePendingVideoIds)
+      ..remove(video.id);
     if (result == null) {
-      state = state.copyWith(archives: List.unmodifiable(previous));
+      state = state.copyWith(
+        archives: List.unmodifiable(previous),
+        archivePendingVideoIds: Set.unmodifiable(updatedPending),
+      );
       _setToast('즐겨찾기를 저장하지 못했습니다. 다시 시도해주세요.');
       return;
     }
 
-    if (willArchive && result.archivedAt != null) {
-      final updated = List<ArchiveEntry>.from(state.archives);
-      final index = updated.indexWhere((entry) => entry.videoId == videoId);
-      if (index >= 0) {
-        updated[index] = ArchiveEntry(
-          videoId: videoId,
-          archivedAt: result.archivedAt!,
-        );
-        state = state.copyWith(archives: List.unmodifiable(updated));
-      }
+    final nextArchives = List<ArchiveEntry>.from(state.archives);
+    nextArchives.removeWhere((entry) => entry.videoId == video.id);
+    if (result.archived) {
+      nextArchives.add(
+        result.entry ??
+            _buildArchiveEntry(
+              video,
+              channel,
+              archivedAt: result.archivedAt ?? _now(),
+            ),
+      );
     }
+    nextArchives.sort((a, b) => b.archivedAt.compareTo(a.archivedAt));
+    state = state.copyWith(
+      archives: List.unmodifiable(nextArchives),
+      archivePendingVideoIds: Set.unmodifiable(updatedPending),
+    );
   }
 
   bool isArchived(String videoId) {
@@ -559,16 +656,17 @@ class AppController extends StateNotifier<AppStateData> {
     await _services.userService.updatePlan(userId, tier.name);
   }
 
-  Future<void> _syncUserProfile() async {
+  Future<void> _syncUserProfile({_AsyncStateContext? context}) async {
+    final currentContext = context ?? _captureAsyncContext();
     final user = state.user;
     if (user == null) return;
     final profile = await _services.userService.upsertUser(
       userId: user.id,
       email: user.email,
-      planTier: user.plan.tier.name,
     );
     if (profile == null) return;
     final tier = _tierFromString(profile.planTier);
+    if (!_canApplyAsyncContext(currentContext)) return;
     if (tier == null || tier == user.plan.tier) return;
     state = state.copyWith(
       user: User(
@@ -596,7 +694,7 @@ class AppController extends StateNotifier<AppStateData> {
     return null;
   }
 
-  Future<void> clearCachedSummaries() async {
+  Future<bool> clearCachedSummaries() async {
     final userId = state.user?.id ?? 'anonymous';
     try {
       final cache = await _services.transcriptCache;
@@ -609,6 +707,7 @@ class AppController extends StateNotifier<AppStateData> {
       transcriptLoading: const <String>{},
       transcriptQueued: const <String>{},
     );
+    return true;
   }
 
   Future<void> clearVideoHistory() async {
@@ -621,23 +720,32 @@ class AppController extends StateNotifier<AppStateData> {
       // Ignore cache failures.
     }
     state = state.copyWith(openedVideoIds: const <String>{});
-    final synced = await _persistUserStateToServer(openedVideoIds: <String>{});
+    final synced = await _persistUserStateToServer(
+      userId: userId,
+      openedVideoIds: <String>{},
+    );
     if (!synced) {
       _setToast('시청 기록 서버 동기화에 실패했습니다.');
     }
   }
 
-  Future<void> clearFavorites() async {
-    if (state.archives.isEmpty) return;
+  Future<bool> clearFavorites() async {
+    if (state.archives.isEmpty) return true;
     final previous = List<ArchiveEntry>.from(state.archives);
     state = state.copyWith(archives: const <ArchiveEntry>[]);
     final userId = state.user?.id;
-    if (userId == null) return;
+    if (userId == null) return true;
+    final context = _captureAsyncContext(userId: userId);
     final ok = await _services.archiveService.clearArchives(userId);
+    if (!_canApplyAsyncContext(context)) {
+      return false;
+    }
     if (!ok) {
       state = state.copyWith(archives: List.unmodifiable(previous));
       _setToast('즐겨찾기 삭제에 실패했습니다.');
+      return false;
     }
+    return true;
   }
 
   Future<void> resetSelectionCooldown() async {
@@ -657,6 +765,7 @@ class AppController extends StateNotifier<AppStateData> {
       // Ignore cache failures.
     }
     final synced = await _persistUserStateToServer(
+      userId: userId,
       selectionChangeDay: 0,
       selectionChangesToday: 0,
     );
@@ -690,6 +799,7 @@ class AppController extends StateNotifier<AppStateData> {
       // Ignore cache failures.
     }
     final synced = await _persistUserStateToServer(
+      userId: userId,
       selectionChangeDay: 0,
       selectionChangesToday: 0,
     );
@@ -701,8 +811,9 @@ class AppController extends StateNotifier<AppStateData> {
   int _dayKey(DateTime date) => date.year * 10000 + date.month * 100 + date.day;
 
   Future<void> _loadSelectionChangeState(
-      {UserStatePayload? remoteState}) async {
-    final userId = state.user?.id;
+      {UserStatePayload? remoteState, _AsyncStateContext? context}) async {
+    final currentContext = context ?? _captureAsyncContext();
+    final userId = currentContext.userId;
     if (userId == null) return;
     SelectionChangeState? localData;
     try {
@@ -726,6 +837,9 @@ class AppController extends StateNotifier<AppStateData> {
           mergedCount = localData.changesToday;
         }
       }
+      if (!_canApplyAsyncContext(currentContext)) {
+        return;
+      }
       state = state.copyWith(
         selectionChangeDay: mergedDay,
         selectionChangesToday: mergedCount,
@@ -748,6 +862,7 @@ class AppController extends StateNotifier<AppStateData> {
       if (mergedDay != remote.selectionChangeDay ||
           mergedCount != remote.selectionChangesToday) {
         await _persistUserStateToServer(
+          userId: userId,
           selectionChangeDay: mergedDay,
           selectionChangesToday: mergedCount,
         );
@@ -756,6 +871,9 @@ class AppController extends StateNotifier<AppStateData> {
     }
 
     if (localData == null) {
+      if (!_canApplyAsyncContext(currentContext)) {
+        return;
+      }
       state = state.copyWith(
         selectionChangeDay: 0,
         selectionChangesToday: 0,
@@ -763,6 +881,9 @@ class AppController extends StateNotifier<AppStateData> {
         dailySwapRemovedId: null,
         selectionChangePending: false,
       );
+      return;
+    }
+    if (!_canApplyAsyncContext(currentContext)) {
       return;
     }
     state = state.copyWith(
@@ -774,8 +895,12 @@ class AppController extends StateNotifier<AppStateData> {
     );
   }
 
-  Future<void> _loadVideoHistoryState({UserStatePayload? remoteState}) async {
-    final userId = state.user?.id;
+  Future<void> _loadVideoHistoryState({
+    UserStatePayload? remoteState,
+    _AsyncStateContext? context,
+  }) async {
+    final currentContext = context ?? _captureAsyncContext();
+    final userId = currentContext.userId;
     if (userId == null) return;
     Set<String> localIds = <String>{};
     try {
@@ -789,6 +914,9 @@ class AppController extends StateNotifier<AppStateData> {
         remoteState ?? await _services.userStateService.fetchState(userId);
     if (remote != null) {
       final merged = <String>{...remote.openedVideoIds, ...localIds};
+      if (!_canApplyAsyncContext(currentContext)) {
+        return;
+      }
       state = state.copyWith(
         openedVideoIds: Set.unmodifiable(merged),
       );
@@ -799,8 +927,14 @@ class AppController extends StateNotifier<AppStateData> {
         // Ignore cache write failures.
       }
       if (merged.length != remote.openedVideoIds.length) {
-        await _persistUserStateToServer(openedVideoIds: merged);
+        await _persistUserStateToServer(
+          userId: userId,
+          openedVideoIds: merged,
+        );
       }
+      return;
+    }
+    if (!_canApplyAsyncContext(currentContext)) {
       return;
     }
     state = state.copyWith(openedVideoIds: Set.unmodifiable(localIds));
@@ -818,7 +952,10 @@ class AppController extends StateNotifier<AppStateData> {
     } catch (_) {
       // Ignore cache failures.
     }
-    await _persistUserStateToServer(openedVideoIds: updated);
+    await _persistUserStateToServer(
+      userId: userId,
+      openedVideoIds: updated,
+    );
   }
 
   bool _canChangeSelectionToday() {
@@ -863,6 +1000,7 @@ class AppController extends StateNotifier<AppStateData> {
       // Ignore cache failures.
     }
     await _persistUserStateToServer(
+      userId: userId,
       selectionChangeDay: dayKey,
       selectionChangesToday: count,
     );
@@ -926,16 +1064,20 @@ class AppController extends StateNotifier<AppStateData> {
       transcriptLoading: const <String>{},
       transcriptQueued: const <String>{},
     );
+    final syncContext = _captureAsyncContext(userId: _e2eUserId);
     final remoteState = await _fetchRemoteUserState(_e2eUserId);
     await Future.wait([
-      _syncUserProfile(),
-      _loadVideoHistoryState(remoteState: remoteState),
-      _loadSelectionChangeState(remoteState: remoteState),
-      _loadArchivesFromServer(),
+      _syncUserProfile(context: syncContext),
+      _loadVideoHistoryState(remoteState: remoteState, context: syncContext),
+      _loadSelectionChangeState(
+        remoteState: remoteState,
+        context: syncContext,
+      ),
+      _loadArchivesFromServer(context: syncContext),
     ]);
-    await _loadSelectionFromServer();
+    await _loadSelectionFromServer(context: syncContext);
     if (state.selectionCompleted) {
-      await _loadSelectedVideos();
+      await _loadSelectedVideos(context: syncContext);
     }
   }
 
@@ -1062,13 +1204,17 @@ class AppController extends StateNotifier<AppStateData> {
           createdAt: _now(),
         ),
       );
+      final syncContext = _captureAsyncContext(userId: account.id);
       final remoteState = await _fetchRemoteUserState(account.id);
       if (!_isAuthFlowCurrent(authRevision)) {
         return;
       }
       await Future.wait([
-        _syncUserProfile(),
-        _loadVideoHistoryState(remoteState: remoteState),
+        _syncUserProfile(context: syncContext),
+        _loadVideoHistoryState(
+          remoteState: remoteState,
+          context: syncContext,
+        ),
       ]);
       if (!_isAuthFlowCurrent(authRevision)) {
         return;
@@ -1078,8 +1224,9 @@ class AppController extends StateNotifier<AppStateData> {
           _connectAndSyncYouTube(
             allowInteractive: allowInteractive,
             remoteState: remoteState,
+            context: syncContext,
           ),
-          _loadArchivesFromServer(),
+          _loadArchivesFromServer(context: syncContext),
         ]).timeout(_initialSyncTimeout);
       } on TimeoutException {
         if (showErrors && _isAuthFlowCurrent(authRevision)) {
@@ -1123,38 +1270,62 @@ class AppController extends StateNotifier<AppStateData> {
   Future<void> _connectAndSyncYouTube({
     bool allowInteractive = false,
     UserStatePayload? remoteState,
+    _AsyncStateContext? context,
   }) async {
     if (_authSession.account == null) {
       throw Exception('로그인이 필요합니다.');
     }
     state = state.copyWith(selectionCompleted: false);
     try {
-      await _loadSelectionChangeState(remoteState: remoteState);
-      await _loadChannels(allowInteractive: allowInteractive);
+      await _loadSelectionChangeState(
+        remoteState: remoteState,
+        context: context,
+      );
+      await _loadChannels(
+        allowInteractive: allowInteractive,
+        context: context,
+      );
+      if (context != null && !_canApplyAsyncContext(context)) {
+        return;
+      }
       state = state.copyWith(youtubeConnected: true);
-      await _loadSelectionFromServer();
+      await _loadSelectionFromServer(context: context);
     } catch (_) {
+      if (context != null && !_canApplyAsyncContext(context)) {
+        return;
+      }
       state = state.copyWith(youtubeConnected: false);
       rethrow;
     }
   }
 
-  Future<void> _loadArchivesFromServer() async {
-    final userId = state.user?.id;
+  Future<void> _loadArchivesFromServer({_AsyncStateContext? context}) async {
+    final currentContext = context ?? _captureAsyncContext();
+    final userId = currentContext.userId;
     if (userId == null) return;
     final entries = await _services.archiveService.fetchArchives(userId);
     if (entries == null) {
       return;
     }
+    if (!_canApplyAsyncContext(currentContext)) {
+      return;
+    }
     state = state.copyWith(archives: List.unmodifiable(entries));
   }
 
-  Future<void> _loadChannels({bool allowInteractive = false}) async {
+  Future<void> _loadChannels({
+    bool allowInteractive = false,
+    _AsyncStateContext? context,
+  }) async {
+    final currentContext = context ?? _captureAsyncContext();
     final channels = await _channelSync.fetchChannels(
       allowInteractive: allowInteractive,
       ensureYouTubeAccess: _ensureYouTubeAccess,
       currentAuthHeaders: _currentAuthHeaders,
     );
+    if (!_canApplyAsyncContext(currentContext)) {
+      return;
+    }
     final normalized = _channelSync.normalizeSelection(
       channels: channels,
       selectedChannelIds: state.selectedChannelIds,
@@ -1166,16 +1337,21 @@ class AppController extends StateNotifier<AppStateData> {
     );
   }
 
-  Future<void> _loadSelectionFromServer() async {
-    final userId = state.user?.id;
+  Future<void> _loadSelectionFromServer({_AsyncStateContext? context}) async {
+    final currentContext = context ?? _captureAsyncContext();
+    final userId = currentContext.userId;
     if (userId == null) return;
     final selected = await _channelSync.fetchSelection(userId);
     if (selected == null) return;
+    if (!_canApplyAsyncContext(currentContext)) {
+      return;
+    }
     if (selected.isEmpty) {
       state = state.copyWith(
         selectedChannelIds: const <String>{},
         selectionCompleted: false,
       );
+      _clearLoadedVideoContent();
       return;
     }
     final filtered = _channelSync.filterServerSelection(
@@ -1188,13 +1364,14 @@ class AppController extends StateNotifier<AppStateData> {
         selectedChannelIds: const <String>{},
         selectionCompleted: false,
       );
+      _clearLoadedVideoContent();
       return;
     }
     state = state.copyWith(
       selectedChannelIds: Set.unmodifiable(filtered),
       selectionCompleted: true,
     );
-    _loadSelectedVideosSilently();
+    _loadSelectedVideosSilently(context: currentContext);
   }
 
   Future<bool> _persistSelectionToServer() async {
@@ -1208,15 +1385,16 @@ class AppController extends StateNotifier<AppStateData> {
   }
 
   Future<bool> _persistUserStateToServer({
+    String? userId,
     int? selectionChangeDay,
     int? selectionChangesToday,
     Set<String>? openedVideoIds,
   }) async {
     if (!mounted) return false;
-    final userId = state.user?.id;
-    if (userId == null) return false;
+    final resolvedUserId = userId ?? state.user?.id;
+    if (resolvedUserId == null) return false;
     return _services.userStateService.saveState(
-      userId: userId,
+      userId: resolvedUserId,
       selectionChangeDay: selectionChangeDay ?? state.selectionChangeDay,
       selectionChangesToday:
           selectionChangesToday ?? state.selectionChangesToday,
@@ -1225,10 +1403,24 @@ class AppController extends StateNotifier<AppStateData> {
     );
   }
 
-  Future<void> _loadSelectedVideos({bool allowInteractive = false}) async {
-    if (state.selectedChannelIds.isEmpty) return;
+  Future<void> _loadSelectedVideos({
+    bool allowInteractive = false,
+    _AsyncStateContext? context,
+  }) async {
+    final currentContext = context ?? _captureAsyncContext();
+    final selectedChannelIds = Set<String>.from(state.selectedChannelIds);
+    if (selectedChannelIds.isEmpty) {
+      if (_canApplyAsyncContext(currentContext)) {
+        _clearLoadedVideoContent();
+      }
+      return;
+    }
     if (AppConfig.e2eTestMode) {
-      final videos = _e2eVideos(state.selectedChannelIds);
+      final videos = _e2eVideos(selectedChannelIds);
+      if (!_canApplyAsyncContext(currentContext) ||
+          !setEquals(state.selectedChannelIds, selectedChannelIds)) {
+        return;
+      }
       state = state.copyWith(
         videos: List.unmodifiable(videos),
         transcripts: const <String, TranscriptResult>{},
@@ -1239,11 +1431,15 @@ class AppController extends StateNotifier<AppStateData> {
       return;
     }
     final videos = await _channelSync.fetchLatestVideos(
-      selectedChannelIds: state.selectedChannelIds.toList(),
+      selectedChannelIds: selectedChannelIds.toList(),
       allowInteractive: allowInteractive,
       ensureYouTubeAccess: _ensureYouTubeAccess,
       currentAuthHeaders: _currentAuthHeaders,
     );
+    if (!_canApplyAsyncContext(currentContext) ||
+        !setEquals(state.selectedChannelIds, selectedChannelIds)) {
+      return;
+    }
     state = state.copyWith(
       videos: List.unmodifiable(videos),
       transcripts: const <String, TranscriptResult>{},
@@ -1253,11 +1449,14 @@ class AppController extends StateNotifier<AppStateData> {
     _transcriptQueueController.reset();
   }
 
-  void _loadSelectedVideosSilently() {
-    if (_authSession.account == null || state.selectedChannelIds.isEmpty) {
+  void _loadSelectedVideosSilently({_AsyncStateContext? context}) {
+    if (!AppConfig.e2eTestMode &&
+        _authSession.account == null &&
+        state.selectedChannelIds.isNotEmpty) {
       return;
     }
-    unawaited(_loadSelectedVideos().catchError((_) {
+    final currentContext = context ?? _captureAsyncContext();
+    unawaited(_loadSelectedVideos(context: currentContext).catchError((_) {
       // Ignore background refresh failures.
     }));
   }
@@ -1362,7 +1561,8 @@ class AppController extends StateNotifier<AppStateData> {
   }
 
   Future<void> _fetchTranscriptFor(Video video) async {
-    if (state.transcripts.containsKey(video.id) ||
+    final existing = state.transcripts[video.id];
+    if ((existing != null && existing.source != 'error') ||
         state.transcriptLoading.contains(video.id)) {
       final queued = Set<String>.from(state.transcriptQueued)..remove(video.id);
       state = state.copyWith(transcriptQueued: Set.unmodifiable(queued));
@@ -1380,8 +1580,11 @@ class AppController extends StateNotifier<AppStateData> {
       return;
     }
 
+    final updatedTranscripts =
+        Map<String, TranscriptResult>.from(state.transcripts)..remove(video.id);
     final loading = Set<String>.from(state.transcriptLoading)..add(video.id);
     state = state.copyWith(
+      transcripts: Map.unmodifiable(updatedTranscripts),
       transcriptLoading: Set.unmodifiable(loading),
       transcriptQueued: Set.unmodifiable(queued),
     );

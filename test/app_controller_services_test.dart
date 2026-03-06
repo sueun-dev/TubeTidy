@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -38,15 +40,57 @@ class _NoopArchiveService implements ArchiveServiceApi {
       <ArchiveEntry>[];
 
   @override
-  Future<ArchiveToggleResult?> toggleArchive(
-    String userId,
-    String videoId,
-  ) async {
+  Future<ArchiveToggleResult?> toggleArchive({
+    required String userId,
+    required ArchiveMutationRequest request,
+  }) async {
     return null;
   }
 
   @override
   Future<bool> clearArchives(String userId) async => true;
+}
+
+class _DelayedArchiveService implements ArchiveServiceApi {
+  _DelayedArchiveService({
+    required this.completer,
+  });
+
+  final Completer<ArchiveToggleResult?> completer;
+  int toggleCalls = 0;
+
+  @override
+  Future<List<ArchiveEntry>?> fetchArchives(String userId) async =>
+      <ArchiveEntry>[];
+
+  @override
+  Future<ArchiveToggleResult?> toggleArchive({
+    required String userId,
+    required ArchiveMutationRequest request,
+  }) {
+    toggleCalls += 1;
+    return completer.future;
+  }
+
+  @override
+  Future<bool> clearArchives(String userId) async => true;
+}
+
+class _FailingArchiveService implements ArchiveServiceApi {
+  @override
+  Future<List<ArchiveEntry>?> fetchArchives(String userId) async =>
+      <ArchiveEntry>[];
+
+  @override
+  Future<ArchiveToggleResult?> toggleArchive({
+    required String userId,
+    required ArchiveMutationRequest request,
+  }) async {
+    return null;
+  }
+
+  @override
+  Future<bool> clearArchives(String userId) async => false;
 }
 
 class _NoopSelectionService implements SelectionServiceApi {
@@ -82,7 +126,6 @@ class _NoopUserService implements UserServiceApi {
   Future<UserProfile?> upsertUser({
     required String userId,
     required String? email,
-    required String planTier,
   }) async {
     return null;
   }
@@ -446,5 +489,153 @@ void main() {
 
     expect(BackendApi.headers().containsKey('Authorization'), isFalse);
     expect(container.read(appControllerProvider).isSignedIn, isFalse);
+  });
+
+  test('toggleArchive ignores repeated taps while a request is in flight',
+      () async {
+    SharedPreferences.setMockInitialValues({});
+    final completer = Completer<ArchiveToggleResult?>();
+    final archiveService = _DelayedArchiveService(completer: completer);
+    final services = AppServices(
+      archiveService: archiveService,
+      selectionService: _NoopSelectionService(),
+      userService: _NoopUserService(),
+      userStateService: _NoopUserStateService(),
+      transcriptService: _FakeTranscriptService(
+        const TranscriptResult(
+          text: 'noop',
+          summary: null,
+          source: 'captions',
+          partial: false,
+        ),
+      ),
+      youtubeApiFactory: (_) => YouTubeApi(authHeaders: const {}),
+      billingServiceFactory: () async => null,
+      transcriptCache: TranscriptCache.create(),
+      videoHistoryCache: VideoHistoryCache.create(),
+      selectionChangeCache: SelectionChangeCache.create(),
+      now: () => DateTime(2026, 2, 8, 12, 0),
+    );
+
+    final video = Video(
+      id: 'video-1',
+      youtubeId: 'video-1',
+      channelId: 'channel-1',
+      title: '테스트 영상',
+      publishedAt: DateTime(2026, 2, 8, 11, 0),
+      thumbnailUrl: 'https://example.com/video.jpg',
+    );
+    final channel = Channel(
+      id: 'channel-1',
+      youtubeChannelId: 'channel-1',
+      title: '테스트 채널',
+      thumbnailUrl: 'https://example.com/channel.jpg',
+    );
+
+    final container = ProviderContainer(
+      overrides: [
+        appControllerProvider.overrideWith(
+          (ref) => AppController(
+            ref,
+            services: services,
+            initialState: _signedInState().copyWith(
+              channels: [channel],
+              videos: [video],
+            ),
+            restoreSession: false,
+          ),
+        ),
+      ],
+    );
+    addTearDown(container.dispose);
+
+    final controller = container.read(appControllerProvider.notifier);
+    unawaited(controller.toggleArchive(video, channel));
+    unawaited(controller.toggleArchive(video, channel));
+    await Future<void>.delayed(const Duration(milliseconds: 10));
+
+    expect(archiveService.toggleCalls, 1);
+    expect(
+      container.read(appControllerProvider).archivePendingVideoIds,
+      contains(video.id),
+    );
+
+    completer.complete(
+      ArchiveToggleResult(
+        archived: true,
+        archivedAt: DateTime(2026, 2, 8, 12, 0),
+        entry: ArchiveEntry(
+          videoId: video.id,
+          archivedAt: DateTime(2026, 2, 8, 12, 0),
+          title: video.title,
+          thumbnailUrl: video.thumbnailUrl,
+          channelId: channel.id,
+          channelTitle: channel.title,
+          channelThumbnailUrl: channel.thumbnailUrl,
+        ),
+      ),
+    );
+    await Future<void>.delayed(const Duration(milliseconds: 10));
+
+    final state = container.read(appControllerProvider);
+    expect(state.archivePendingVideoIds, isEmpty);
+    expect(state.archives.map((entry) => entry.videoId), contains(video.id));
+  });
+
+  test('clearFavorites returns false when backend clear fails', () async {
+    SharedPreferences.setMockInitialValues({});
+    final services = AppServices(
+      archiveService: _FailingArchiveService(),
+      selectionService: _NoopSelectionService(),
+      userService: _NoopUserService(),
+      userStateService: _NoopUserStateService(),
+      transcriptService: _FakeTranscriptService(
+        const TranscriptResult(
+          text: 'noop',
+          summary: null,
+          source: 'captions',
+          partial: false,
+        ),
+      ),
+      youtubeApiFactory: (_) => YouTubeApi(authHeaders: const {}),
+      billingServiceFactory: () async => null,
+      transcriptCache: TranscriptCache.create(),
+      videoHistoryCache: VideoHistoryCache.create(),
+      selectionChangeCache: SelectionChangeCache.create(),
+      now: DateTime.now,
+    );
+
+    final initialState = _signedInState().copyWith(
+      archives: [
+        ArchiveEntry(
+          videoId: 'video-1',
+          archivedAt: DateTime(2026, 2, 8, 12, 0),
+        ),
+      ],
+    );
+
+    final container = ProviderContainer(
+      overrides: [
+        appControllerProvider.overrideWith(
+          (ref) => AppController(
+            ref,
+            services: services,
+            initialState: initialState,
+            restoreSession: false,
+          ),
+        ),
+      ],
+    );
+    addTearDown(container.dispose);
+
+    final controller = container.read(appControllerProvider.notifier);
+    final success = await controller.clearFavorites();
+
+    expect(success, isFalse);
+    expect(container.read(appControllerProvider).archives, isNotEmpty);
+    expect(
+      container.read(appControllerProvider).toastMessage,
+      contains('즐겨찾기 삭제에 실패했습니다'),
+    );
   });
 }

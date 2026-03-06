@@ -91,18 +91,21 @@ class DatabaseIntegrationTest(unittest.TestCase):
             },
         )
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.json().get('plan_tier'), 'starter')
+        self.assertEqual(response.json().get('plan_tier'), 'free')
 
         response = self.client.get('/user', params={'user_id': user_id})
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.json().get('plan_tier'), 'starter')
+        self.assertEqual(response.json().get('plan_tier'), 'free')
 
         response = self.client.post(
             '/user/plan',
             json={'user_id': user_id, 'plan_tier': 'growth'},
         )
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.json().get('plan_tier'), 'growth')
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(
+            response.json().get('detail'),
+            'plan updates require trusted server credentials',
+        )
 
     def test_selection_roundtrip(self) -> None:
         """Persist and fetch channel selections using the database."""
@@ -137,6 +140,76 @@ class DatabaseIntegrationTest(unittest.TestCase):
             {'channel-a', 'channel-b'},
         )
 
+    def test_selection_rejects_plan_limit_exceeded(self) -> None:
+        """Free-plan users should not be able to persist more than 3 channels."""
+        user_id = f'user_{uuid.uuid4().hex}'
+        response = self.client.post(
+            '/selection',
+            json={
+                'user_id': user_id,
+                'channels': [
+                    {'id': 'channel-a', 'title': 'Channel A'},
+                    {'id': 'channel-b', 'title': 'Channel B'},
+                    {'id': 'channel-c', 'title': 'Channel C'},
+                    {'id': 'channel-d', 'title': 'Channel D'},
+                ],
+                'selected_ids': ['channel-a', 'channel-b', 'channel-c', 'channel-d'],
+            },
+        )
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(
+            response.json().get('detail'),
+            'selected channel limit exceeded for current plan',
+        )
+
+    def test_get_selection_trims_legacy_over_limit_state(self) -> None:
+        """Selection reads should trim and clean up legacy over-limit rows."""
+        import server.db as db_module
+        import server.models as models
+
+        user_id = f'user_{uuid.uuid4().hex}'
+        with db_module.get_session() as session:
+            session.add(models.User(id=user_id, plan_tier='free'))
+            for channel_id in ('channel-a', 'channel-b', 'channel-c', 'channel-d'):
+                session.add(
+                    models.Channel(
+                        id=channel_id,
+                        youtube_channel_id=channel_id,
+                        title=channel_id,
+                        thumbnail_url=None,
+                    )
+                )
+                session.add(
+                    models.UserChannel(
+                        user_id=user_id,
+                        channel_id=channel_id,
+                        is_selected=True,
+                    )
+                )
+            session.commit()
+
+        response = self.client.get('/selection', params={'user_id': user_id})
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            response.json().get('selected_ids'),
+            ['channel-a', 'channel-b', 'channel-c'],
+        )
+
+        with db_module.get_session() as session:
+            rows = (
+                session.query(models.UserChannel)
+                .filter(
+                    models.UserChannel.user_id == user_id,
+                    models.UserChannel.is_selected.is_(True),
+                )
+                .order_by(models.UserChannel.channel_id.asc())
+                .all()
+            )
+        self.assertEqual(
+            [row.channel_id for row in rows],
+            ['channel-a', 'channel-b', 'channel-c'],
+        )
+
     def test_archive_roundtrip(self) -> None:
         """Persist and remove archive entries using the database."""
         user_id = f'user_{uuid.uuid4().hex}'
@@ -144,21 +217,38 @@ class DatabaseIntegrationTest(unittest.TestCase):
 
         response = self.client.post(
             '/archives/toggle',
-            json={'user_id': user_id, 'video_id': video_id},
+            json={
+                'user_id': user_id,
+                'video_id': video_id,
+                'archived': True,
+                'title': 'Archived title',
+                'thumbnail_url': 'https://example.com/video.jpg',
+                'channel_id': 'channel-a',
+                'channel_title': 'Channel A',
+                'channel_thumbnail_url': 'https://example.com/channel.jpg',
+            },
         )
         self.assertEqual(response.status_code, 200)
         self.assertTrue(response.json().get('archived'))
+        self.assertEqual(response.json().get('title'), 'Archived title')
+        self.assertEqual(response.json().get('channel_title'), 'Channel A')
 
         response = self.client.get('/archives', params={'user_id': user_id})
         self.assertEqual(response.status_code, 200)
         items = response.json().get('items', [])
-        self.assertTrue(
-            any(item.get('video_id') == video_id for item in items)
+        matching = next(
+            (item for item in items if item.get('video_id') == video_id),
+            None,
         )
+        self.assertIsNotNone(matching)
+        self.assertEqual(matching.get('title'), 'Archived title')
+        self.assertEqual(matching.get('thumbnail_url'), 'https://example.com/video.jpg')
+        self.assertEqual(matching.get('channel_id'), 'channel-a')
+        self.assertEqual(matching.get('channel_title'), 'Channel A')
 
         response = self.client.post(
             '/archives/toggle',
-            json={'user_id': user_id, 'video_id': video_id},
+            json={'user_id': user_id, 'video_id': video_id, 'archived': False},
         )
         self.assertEqual(response.status_code, 200)
         self.assertFalse(response.json().get('archived'))
@@ -191,6 +281,36 @@ class DatabaseIntegrationTest(unittest.TestCase):
             body.get('opened_video_ids'),
             ['abc12345xyz', 'def67890uvw'],
         )
+
+    def test_user_state_concurrent_writes_do_not_fail(self) -> None:
+        """Concurrent same-user state writes should not raise 500s."""
+        import server.app as app_module
+
+        user_id = f'user_{uuid.uuid4().hex}'
+        barrier = threading.Barrier(5)
+
+        def _write_state(index: int):
+            payload = {
+                'user_id': user_id,
+                'selection_change_day': 20260306,
+                'selection_changes_today': index,
+                'opened_video_ids': [f'abc12345x{index}'],
+            }
+            with TestClient(app_module.app) as client:
+                barrier.wait(timeout=5)
+                return client.post('/user/state', json=payload)
+
+        with ThreadPoolExecutor(max_workers=4) as executor:
+            futures = [executor.submit(_write_state, index) for index in range(4)]
+            barrier.wait(timeout=5)
+            responses = [future.result(timeout=10) for future in futures]
+
+        for response in responses:
+            self.assertEqual(response.status_code, 200)
+
+        response = self.client.get('/user/state', params={'user_id': user_id})
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json().get('selection_change_day'), 20260306)
         response = self.client.get('/user/state', params={'user_id': user_id})
         self.assertEqual(response.status_code, 200)
         body = response.json()
