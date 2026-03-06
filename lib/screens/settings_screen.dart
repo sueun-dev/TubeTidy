@@ -247,7 +247,7 @@ class SettingsScreen extends ConsumerWidget {
                             strings,
                             strings.clearFavorites,
                             strings.clearFavoritesBody,
-                            () async => controller.clearFavorites(),
+                            () => controller.clearFavorites(),
                           ),
                         ),
                       ],
@@ -320,7 +320,7 @@ class SettingsScreen extends ConsumerWidget {
     AppStrings strings,
     String title,
     String body,
-    Future<void> Function() onConfirm,
+    Future<bool> Function() onConfirm,
   ) async {
     return showCupertinoDialog<void>(
       context: context,
@@ -336,8 +336,8 @@ class SettingsScreen extends ConsumerWidget {
             isDefaultAction: true,
             onPressed: () async {
               Navigator.of(dialogContext).pop();
-              await onConfirm();
-              if (!context.mounted) return;
+              final succeeded = await onConfirm();
+              if (!context.mounted || !succeeded) return;
               await showCupertinoDialog<void>(
                 context: context,
                 builder: (doneContext) => CupertinoAlertDialog(

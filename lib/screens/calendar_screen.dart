@@ -1,6 +1,8 @@
 import 'package:flutter/cupertino.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+
 import '../localization/app_strings.dart';
+import '../models/archive.dart';
 import '../models/channel.dart';
 import '../models/video.dart';
 import '../state/app_controller.dart';
@@ -33,6 +35,9 @@ class CalendarScreen extends ConsumerWidget {
     }
 
     final archiveMap = _filteredArchives(appState, filterChannelId);
+    final archiveByVideoId = {
+      for (final entry in appState.archives) entry.videoId: entry,
+    };
     final selectedKey =
         DateTime(selectedDay.year, selectedDay.month, selectedDay.day);
     final selectedVideos = archiveMap[selectedKey] ?? [];
@@ -142,13 +147,21 @@ class CalendarScreen extends ConsumerWidget {
                     delegate: SliverChildBuilderDelegate(
                       (context, index) {
                         final video = selectedVideos[index];
+                        final archivedEntry = archiveByVideoId[video.id];
                         final channel = channelById[video.channelId] ??
                             Channel(
                               id: video.channelId,
                               youtubeChannelId: '',
-                              title: strings.unknownChannel,
-                              thumbnailUrl: '',
+                              title: archivedEntry?.channelTitle ??
+                                  strings.unknownChannel,
+                              thumbnailUrl:
+                                  archivedEntry?.channelThumbnailUrl ?? '',
                             );
+                        final thumbnailUrl = video.thumbnailUrl.isNotEmpty
+                            ? video.thumbnailUrl
+                            : (archivedEntry?.thumbnailUrl?.isNotEmpty == true
+                                ? archivedEntry!.thumbnailUrl!
+                                : channel.thumbnailUrl);
 
                         return Padding(
                           key: ValueKey('calendar-${video.id}'),
@@ -163,22 +176,34 @@ class CalendarScreen extends ConsumerWidget {
                                 ClipRRect(
                                   borderRadius:
                                       BorderRadius.circular(LiquidRadius.sm),
-                                  child: Image.network(
-                                    video.thumbnailUrl,
-                                    width: 64,
-                                    height: 64,
-                                    fit: BoxFit.cover,
-                                    errorBuilder: (_, __, ___) => Container(
-                                      width: 64,
-                                      height: 64,
-                                      color: LiquidColors.glassDark,
-                                      alignment: Alignment.center,
-                                      child: const Icon(
-                                        CupertinoIcons.photo,
-                                        color: LiquidColors.textSecondary,
-                                      ),
-                                    ),
-                                  ),
+                                  child: thumbnailUrl.isEmpty
+                                      ? Container(
+                                          width: 64,
+                                          height: 64,
+                                          color: LiquidColors.glassDark,
+                                          alignment: Alignment.center,
+                                          child: const Icon(
+                                            CupertinoIcons.photo,
+                                            color: LiquidColors.textSecondary,
+                                          ),
+                                        )
+                                      : Image.network(
+                                          thumbnailUrl,
+                                          width: 64,
+                                          height: 64,
+                                          fit: BoxFit.cover,
+                                          errorBuilder: (_, __, ___) =>
+                                              Container(
+                                            width: 64,
+                                            height: 64,
+                                            color: LiquidColors.glassDark,
+                                            alignment: Alignment.center,
+                                            child: const Icon(
+                                              CupertinoIcons.photo,
+                                              color: LiquidColors.textSecondary,
+                                            ),
+                                          ),
+                                        ),
                                 ),
                                 const SizedBox(width: 12),
                                 Expanded(
@@ -208,8 +233,8 @@ class CalendarScreen extends ConsumerWidget {
                                   button: true,
                                   child: CupertinoButton(
                                     padding: EdgeInsets.zero,
-                                    onPressed: () =>
-                                        controller.toggleArchive(video.id),
+                                    onPressed: () => controller.toggleArchive(
+                                        video, channel),
                                     child: const Icon(
                                       CupertinoIcons.star_fill,
                                       color: LiquidColors.accent,
@@ -239,8 +264,7 @@ class CalendarScreen extends ConsumerWidget {
     final Map<DateTime, List<Video>> result = {};
     final videoMap = {for (final v in state.videos) v.id: v};
     for (final entry in state.archives) {
-      final video = videoMap[entry.videoId];
-      if (video == null) continue;
+      final video = videoMap[entry.videoId] ?? _videoFromArchiveEntry(entry);
       if (filterChannelId != allChannelsFilter &&
           video.channelId != filterChannelId) {
         continue;
@@ -250,6 +274,19 @@ class CalendarScreen extends ConsumerWidget {
       result.putIfAbsent(day, () => []).add(video);
     }
     return result;
+  }
+
+  Video _videoFromArchiveEntry(ArchiveEntry entry) {
+    return Video(
+      id: entry.videoId,
+      youtubeId: entry.videoId,
+      channelId: entry.channelId ?? '__archive_channel__',
+      title: (entry.title ?? '').trim().isNotEmpty
+          ? entry.title!
+          : 'Archived video',
+      publishedAt: entry.archivedAt,
+      thumbnailUrl: entry.thumbnailUrl ?? entry.channelThumbnailUrl ?? '',
+    );
   }
 }
 

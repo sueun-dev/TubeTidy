@@ -18,7 +18,6 @@ class UserService {
   static Future<UserProfile?> upsertUser({
     required String userId,
     required String? email,
-    required String planTier,
   }) async {
     if (userId.isEmpty) return null;
     final uri = BackendApi.uri('/user/upsert');
@@ -30,13 +29,12 @@ class UserService {
             body: jsonEncode({
               'user_id': userId,
               'email': email,
-              'plan_tier': planTier,
             }),
           )
           .timeout(_timeout);
       if (response.statusCode != 200) return null;
       final data = jsonDecode(response.body) as Map<String, dynamic>;
-      final plan = data['plan_tier'] as String? ?? planTier;
+      final plan = data['plan_tier'] as String? ?? 'free';
       final mail = data['email'] as String?;
       return UserProfile(userId: userId, email: mail, planTier: plan);
     } catch (_) {

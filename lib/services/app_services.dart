@@ -14,7 +14,10 @@ import '../services/youtube_api.dart';
 
 abstract class ArchiveServiceApi {
   Future<List<ArchiveEntry>?> fetchArchives(String userId);
-  Future<ArchiveToggleResult?> toggleArchive(String userId, String videoId);
+  Future<ArchiveToggleResult?> toggleArchive({
+    required String userId,
+    required ArchiveMutationRequest request,
+  });
   Future<bool> clearArchives(String userId);
 }
 
@@ -25,8 +28,14 @@ class DefaultArchiveService implements ArchiveServiceApi {
   }
 
   @override
-  Future<ArchiveToggleResult?> toggleArchive(String userId, String videoId) {
-    return ArchiveService.toggleArchive(userId, videoId);
+  Future<ArchiveToggleResult?> toggleArchive({
+    required String userId,
+    required ArchiveMutationRequest request,
+  }) {
+    return ArchiveService.toggleArchive(
+      userId: userId,
+      request: request,
+    );
   }
 
   @override
@@ -68,7 +77,6 @@ abstract class UserServiceApi {
   Future<UserProfile?> upsertUser({
     required String userId,
     required String? email,
-    required String planTier,
   });
   Future<UserProfile?> fetchUser(String userId);
   Future<bool> updatePlan(String userId, String planTier);
@@ -79,12 +87,10 @@ class DefaultUserService implements UserServiceApi {
   Future<UserProfile?> upsertUser({
     required String userId,
     required String? email,
-    required String planTier,
   }) {
     return UserService.upsertUser(
       userId: userId,
       email: email,
-      planTier: planTier,
     );
   }
 

@@ -59,6 +59,19 @@ class AppTestCase(unittest.TestCase):
         self.assertEqual(response.status_code, 400)
         self.assertEqual(response.json().get('detail'), 'video_id is invalid')
 
+    def test_transcript_requires_bearer_token_when_auth_enabled(self) -> None:
+        """Transcript endpoint should require auth when backend auth is enabled."""
+        with patch.object(backend, 'BACKEND_REQUIRE_AUTH', True):
+            response = self.client.post(
+                '/transcript',
+                json={'video_id': 'abc12345xyz'},
+            )
+        self.assertEqual(response.status_code, 401)
+        self.assertEqual(
+            response.json().get('detail'),
+            'authorization is required',
+        )
+
     def test_normalize_summary_lines(self) -> None:
         """Normalize summary to a fixed number of lines."""
         summary = '• 첫 번째 줄\\n• 두 번째 줄\\n• 세 번째 줄'
@@ -157,6 +170,27 @@ class AppTestCase(unittest.TestCase):
             },
         )
         self.assertEqual(response.status_code, 413)
+
+    def test_selection_rejects_over_plan_limit_without_db(self) -> None:
+        """Selection saves should not exceed the default free plan limit."""
+        response = self.client.post(
+            '/selection',
+            json={
+                'user_id': 'user_1234',
+                'channels': [
+                    {'id': 'chan001', 'title': 'Channel 1'},
+                    {'id': 'chan002', 'title': 'Channel 2'},
+                    {'id': 'chan003', 'title': 'Channel 3'},
+                    {'id': 'chan004', 'title': 'Channel 4'},
+                ],
+                'selected_ids': ['chan001', 'chan002', 'chan003', 'chan004'],
+            },
+        )
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(
+            response.json().get('detail'),
+            'selected channel limit exceeded for current plan',
+        )
 
     def test_user_requires_valid_id(self) -> None:
         """User ID should fail with invalid format."""
@@ -300,6 +334,33 @@ class AppTestCase(unittest.TestCase):
                 )
         self.assertEqual(response.status_code, 503)
         self.assertEqual(response.json().get('detail'), 'database required')
+
+    def test_user_upsert_ignores_client_plan_tier(self) -> None:
+        """Profile upsert should not trust plan tiers supplied by clients."""
+        response = self.client.post(
+            '/user/upsert',
+            json={
+                'user_id': 'user_1234',
+                'email': 'user@example.com',
+                'plan_tier': 'unlimited',
+            },
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json().get('plan_tier'), 'free')
+
+    def test_plan_update_rejected_without_trusted_credentials(self) -> None:
+        """Plan updates should fail without trusted server credentials."""
+        with patch.object(backend, 'ALLOW_CLIENT_PLAN_UPDATES', False):
+            with patch.object(backend, 'PLAN_UPDATE_SHARED_SECRET', ''):
+                response = self.client.post(
+                    '/user/plan',
+                    json={'user_id': 'user_1234', 'plan_tier': 'growth'},
+                )
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(
+            response.json().get('detail'),
+            'plan updates require trusted server credentials',
+        )
 
     def test_google_claim_validation_requires_azp_for_multi_aud(self) -> None:
         """Multi-audience tokens should include a valid azp claim."""

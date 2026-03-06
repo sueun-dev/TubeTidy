@@ -157,7 +157,7 @@ class HomeScreen extends ConsumerWidget {
                             isArchived: archivedIds.contains(video.id),
                             onToggleArchive: () => ref
                                 .read(appControllerProvider.notifier)
-                                .toggleArchive(video.id),
+                                .toggleArchive(video, channel),
                             onRequestSummary: () => ref
                                 .read(appControllerProvider.notifier)
                                 .requestSummaryFor(video),
