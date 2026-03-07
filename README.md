@@ -70,7 +70,11 @@ SUPPORT_URL=https://example.com/support
 docker compose up -d postgres
 ```
 Default local mapping is `127.0.0.1:5433 -> container:5432`.
-The server auto-creates tables and runtime indexes when `DATABASE_URL` is set.
+Run explicit migrations before starting the API if you are not using the helper script:
+```bash
+python3 scripts/migrate_db.py
+```
+`./scripts/run_transcript_server.sh` runs this migration step automatically when `DATABASE_URL` is set.
 
 ### 3) Run transcript server
 ```bash
@@ -140,6 +144,7 @@ python3 -m http.server 5301 --bind 127.0.0.1 --directory build/web
 ```bash
 flutter test
 ./.venv/bin/python -m unittest server.tests.test_app
+DATABASE_URL=postgresql+psycopg2://youtube_summary:youtube_summary@127.0.0.1:5433/youtube_summary python3 scripts/migrate_db.py
 DATABASE_URL=postgresql+psycopg2://youtube_summary:youtube_summary@127.0.0.1:5433/youtube_summary ./.venv/bin/python -m unittest server.tests.test_db_integration
 ```
 If PostgreSQL is unavailable, `server.tests.test_db_integration` is skipped automatically.

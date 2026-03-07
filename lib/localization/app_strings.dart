@@ -935,6 +935,27 @@ class AppStrings {
         zh: '购买未完成，请重试。',
         es: 'La compra no se completó. Inténtalo de nuevo.',
       );
+  String get iapPlanManagementUnavailable => _t(
+        en: 'Plan changes are disabled until secure server sync is configured.',
+        ko: '안전한 서버 플랜 동기화가 설정되기 전까지 플랜 변경을 사용할 수 없습니다.',
+        ja: '安全なサーバー同期が設定されるまで、プラン変更は利用できません。',
+        zh: '在配置安全的服务器同步之前，无法更改方案。',
+        es: 'Los cambios de plan están deshabilitados hasta que se configure la sincronización segura del servidor.',
+      );
+  String get iapPlanSyncFailed => _t(
+        en: 'Purchase was recorded, but plan sync failed. Restore purchases and try again.',
+        ko: '구매는 기록되었지만 플랜 동기화에 실패했습니다. 구매 복원 후 다시 시도해주세요.',
+        ja: '購入は記録されましたが、プラン同期に失敗しました。購入を復元して再試行してください。',
+        zh: '购买已记录，但方案同步失败。请恢复购买后重试。',
+        es: 'La compra se registró, pero falló la sincronización del plan. Restaura las compras e inténtalo de nuevo.',
+      );
+  String get iapPlanManagedExternally => _t(
+        en: 'To downgrade or cancel, manage your subscription in the App Store.',
+        ko: '다운그레이드 또는 해지는 App Store 구독 관리에서 진행해주세요.',
+        ja: 'ダウングレードや解約はApp Storeのサブスクリプション管理で行ってください。',
+        zh: '降级或取消订阅请在 App Store 订阅管理中进行。',
+        es: 'Para bajar de plan o cancelar, administra tu suscripción en App Store.',
+      );
   String get iapRestoreUnavailable => _t(
         en: 'Restore is available on iOS only.',
         ko: '복원은 iOS에서만 사용할 수 있습니다.',

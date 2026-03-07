@@ -35,7 +35,7 @@ from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from yt_dlp import YoutubeDL
 from yt_dlp.utils import DownloadError
 
-from .db import check_db, get_session, init_db, is_db_enabled
+from .db import check_db, get_session, is_db_enabled, validate_schema
 from .models import (
     Archive,
     Channel,
@@ -219,11 +219,18 @@ async def app_lifespan(_: FastAPI):
         raise RuntimeError(
             'FAIL_CLOSED_WITHOUT_DB=true 이지만 DATABASE_URL이 설정되지 않았습니다.'
         )
-    init_db()
     if FAIL_CLOSED_WITHOUT_DB and not check_db():
         raise RuntimeError(
             'FAIL_CLOSED_WITHOUT_DB=true 이지만 데이터베이스 연결이 불가능합니다.'
         )
+    if is_db_enabled():
+        schema_ok, schema_detail = validate_schema()
+        if not schema_ok:
+            detail = schema_detail or 'unknown schema error'
+            raise RuntimeError(
+                '데이터베이스 스키마가 준비되지 않았습니다. '
+                f'scripts/migrate_db.py를 먼저 실행하세요. ({detail})'
+            )
     yield
 
 
@@ -745,10 +752,18 @@ def root():
 def health_check():
     """Return health status and database connectivity."""
     db_enabled = is_db_enabled()
+    db_ok = check_db() if db_enabled else False
+    schema_ok = False
+    schema_detail = None
+    if db_enabled and db_ok:
+        schema_ok, schema_detail = validate_schema()
     return {
         'status': 'ok',
         'db_enabled': db_enabled,
-        'db_ok': check_db() if db_enabled else False,
+        'db_ok': db_ok,
+        'schema_ok': schema_ok,
+        'schema_detail': schema_detail,
+        'client_plan_management_enabled': ALLOW_CLIENT_PLAN_UPDATES,
     }
 
 
@@ -912,6 +927,62 @@ def _ensure_user_exists(session: Any, user_id: str) -> None:
     if user is None:
         session.add(User(id=user_id, plan_tier='free'))
         session.flush()
+
+
+def _upsert_user_profile(
+    session: Any,
+    *,
+    user_id: str,
+    email: Optional[str],
+) -> User:
+    payload = {
+        'id': user_id,
+        'email': email,
+        'plan_tier': 'free',
+    }
+
+    if _is_postgres_session(session) and pg_insert is not None:
+        stmt = (
+            pg_insert(User.__table__)
+            .values(**payload)
+            .on_conflict_do_update(
+                index_elements=['id'],
+                set_={'email': email},
+            )
+        )
+        session.execute(stmt)
+        user = session.query(User).filter(User.id == user_id).first()
+        if user is None:
+            raise HTTPException(status_code=500, detail='user upsert failed')
+        return user
+
+    if _is_sqlite_session(session) and sqlite_insert is not None:
+        stmt = (
+            sqlite_insert(User.__table__)
+            .values(**payload)
+            .on_conflict_do_update(
+                index_elements=['id'],
+                set_={'email': email},
+            )
+        )
+        session.execute(stmt)
+        user = session.query(User).filter(User.id == user_id).first()
+        if user is None:
+            raise HTTPException(status_code=500, detail='user upsert failed')
+        return user
+
+    user = session.query(User).filter(User.id == user_id).first()
+    if user is None:
+        user = User(
+            id=user_id,
+            email=email,
+            plan_tier='free',
+        )
+        session.add(user)
+        session.flush()
+    else:
+        user.email = email
+    return user
 
 
 def _upsert_channels(
@@ -1531,16 +1602,11 @@ def upsert_user(
         with get_session() as session:
             if session is None:
                 _raise_db_unavailable()
-            user = session.query(User).filter(User.id == user_id).first()
-            if user is None:
-                user = User(
-                    id=user_id,
-                    email=email,
-                    plan_tier='free',
-                )
-                session.add(user)
-            else:
-                user.email = email
+            user = _upsert_user_profile(
+                session,
+                user_id=user_id,
+                email=email,
+            )
             session.commit()
             return {
                 'user_id': user.id,
@@ -1755,10 +1821,6 @@ def get_selection(
                 user.plan_tier if user is not None else 'free'
             )
             if limit is not None and len(selected_ids) > limit:
-                for row in rows[limit:]:
-                    row.is_selected = False
-                    session.add(row)
-                session.commit()
                 selected_ids = selected_ids[:limit]
             return {'selected_ids': selected_ids}
     except SQLAlchemyError as exc:

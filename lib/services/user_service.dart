@@ -60,6 +60,19 @@ class UserService {
     }
   }
 
+  static Future<bool> supportsClientPlanManagement() async {
+    final uri = BackendApi.uri('/health');
+    try {
+      final response =
+          await http.get(uri, headers: BackendApi.headers()).timeout(_timeout);
+      if (response.statusCode != 200) return false;
+      final data = jsonDecode(response.body) as Map<String, dynamic>;
+      return data['client_plan_management_enabled'] == true;
+    } catch (_) {
+      return false;
+    }
+  }
+
   static Future<bool> updatePlan(String userId, String planTier) async {
     if (userId.isEmpty) return false;
     final uri = BackendApi.uri('/user/plan');

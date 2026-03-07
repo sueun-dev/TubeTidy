@@ -626,34 +626,59 @@ class AppController extends StateNotifier<AppStateData> {
   static const String purchaseUnavailable =
       PlanBillingController.purchaseUnavailable;
   static const String purchaseFailed = PlanBillingController.purchaseFailed;
+  static const String planSyncFailed = PlanBillingController.planSyncFailed;
+  static const String planManagementUnavailable =
+      'plan_management_unavailable';
+  static const String planManagedExternally = 'plan_managed_externally';
   static const String restoreUnavailable =
       PlanBillingController.restoreUnavailable;
   static const String restoreNone = PlanBillingController.restoreNone;
   static const String restoreNotFound = PlanBillingController.restoreNotFound;
 
   Future<String?> purchasePlan(PlanTier tier) async {
+    final currentTier = state.plan.tier;
+    if (tier == currentTier) {
+      return null;
+    }
+    if (tier == PlanTier.free) {
+      return planManagedExternally;
+    }
+    if (!await _services.userService.supportsClientPlanManagement()) {
+      return planManagementUnavailable;
+    }
+    final previousTier = currentTier;
     return _planBilling.purchasePlan(
       tier: tier,
       onActivateLocalPlan: (resolvedTier) async {
         upgradePlan(resolvedTier);
+      },
+      onRollbackLocalPlan: () async {
+        upgradePlan(previousTier);
       },
       onPersistPlan: _persistPlan,
     );
   }
 
   Future<String?> restorePurchases() async {
+    if (!await _services.userService.supportsClientPlanManagement()) {
+      return planManagementUnavailable;
+    }
+    final previousTier = state.plan.tier;
     return _planBilling.restorePurchases(
       onActivateLocalPlan: (resolvedTier) async {
         upgradePlan(resolvedTier);
+      },
+      onRollbackLocalPlan: () async {
+        upgradePlan(previousTier);
       },
       onPersistPlan: _persistPlan,
     );
   }
 
-  Future<void> _persistPlan(PlanTier tier) async {
+  Future<bool> _persistPlan(PlanTier tier) async {
     final userId = state.user?.id;
-    if (userId == null) return;
-    await _services.userService.updatePlan(userId, tier.name);
+    if (userId == null) return false;
+    return _services.userService.updatePlan(userId, tier.name);
   }
 
   Future<void> _syncUserProfile({_AsyncStateContext? context}) async {

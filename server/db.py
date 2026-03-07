@@ -4,6 +4,7 @@ from contextlib import contextmanager
 import logging
 import os
 from pathlib import Path
+from typing import Optional
 
 from dotenv import load_dotenv
 
@@ -42,9 +43,17 @@ def init_db() -> None:
         return
     try:
         models.Base.metadata.create_all(_ENGINE)
-        _apply_runtime_migrations()
     except SQLAlchemyError:
         logging.exception('Failed to initialize database schema.')
+        raise
+
+
+def migrate_db() -> None:
+    """Apply explicit schema/data migrations for existing databases."""
+    if _ENGINE is None:
+        return
+    init_db()
+    _apply_runtime_migrations()
 
 
 def check_db() -> bool:
@@ -143,6 +152,7 @@ def _apply_runtime_migrations() -> None:
             _ensure_optional_columns(conn)
     except SQLAlchemyError:
         logging.exception('Runtime migration failed.')
+        raise
 
 
 def _ensure_optional_columns(conn) -> None:
@@ -155,6 +165,48 @@ def _ensure_optional_columns(conn) -> None:
 
     if 'videos' in table_columns and 'thumbnail_url' not in table_columns['videos']:
         conn.execute(text('ALTER TABLE videos ADD COLUMN thumbnail_url TEXT'))
+
+
+def validate_schema() -> tuple[bool, Optional[str]]:
+    """Validate that the live database has the minimum schema required by the app."""
+    if _ENGINE is None:
+        return True, None
+
+    required_tables = {
+        'users',
+        'user_state',
+        'channels',
+        'user_channels',
+        'videos',
+        'archives',
+        'transcript_cache',
+    }
+    required_columns = {
+        'videos': {'thumbnail_url'},
+    }
+
+    try:
+        with _ENGINE.connect() as conn:
+            inspector = inspect(conn)
+            tables = set(inspector.get_table_names())
+            missing_tables = sorted(required_tables - tables)
+            if missing_tables:
+                return False, f"missing tables: {', '.join(missing_tables)}"
+
+            for table_name, columns in required_columns.items():
+                table_columns = {
+                    column['name'] for column in inspector.get_columns(table_name)
+                }
+                missing_columns = sorted(columns - table_columns)
+                if missing_columns:
+                    return (
+                        False,
+                        f"{table_name} missing columns: {', '.join(missing_columns)}",
+                    )
+    except SQLAlchemyError as exc:
+        return False, f'schema inspection failed: {exc.__class__.__name__}'
+
+    return True, None
 
 
 @contextmanager
