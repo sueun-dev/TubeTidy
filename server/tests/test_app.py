@@ -40,6 +40,8 @@ class AppTestCase(unittest.TestCase):
         payload = response.json()
         self.assertIn('status', payload)
         self.assertIn('db_enabled', payload)
+        self.assertIn('schema_ok', payload)
+        self.assertIn('client_plan_management_enabled', payload)
 
     def test_trim_text(self) -> None:
         """Trimmed text should include ellipsis and mark partial."""

@@ -47,6 +47,9 @@ class _NoopUserService implements UserServiceApi {
   Future<UserProfile?> fetchUser(String userId) async => null;
 
   @override
+  Future<bool> supportsClientPlanManagement() async => true;
+
+  @override
   Future<bool> updatePlan(String userId, String planTier) async => true;
 }
 

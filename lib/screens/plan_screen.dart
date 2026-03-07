@@ -270,6 +270,12 @@ class PlanScreen extends ConsumerWidget {
         return strings.iapUnavailable;
       case AppController.purchaseFailed:
         return strings.iapFailed;
+      case AppController.planManagementUnavailable:
+        return strings.iapPlanManagementUnavailable;
+      case AppController.planManagedExternally:
+        return strings.iapPlanManagedExternally;
+      case AppController.planSyncFailed:
+        return strings.iapPlanSyncFailed;
       case AppController.restoreUnavailable:
         return strings.iapRestoreUnavailable;
       case AppController.restoreNone:

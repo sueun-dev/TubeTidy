@@ -60,7 +60,11 @@ void main() {
     final result = await controller.purchasePlan(
       tier: PlanTier.free,
       onActivateLocalPlan: (_) async => activated += 1,
-      onPersistPlan: (_) async => persisted += 1,
+      onPersistPlan: (_) async {
+        persisted += 1;
+        return true;
+      },
+      onRollbackLocalPlan: () async {},
     );
 
     expect(result, isNull);
@@ -78,7 +82,8 @@ void main() {
     final result = await controller.purchasePlan(
       tier: PlanTier.starter,
       onActivateLocalPlan: (_) async {},
-      onPersistPlan: (_) async {},
+      onPersistPlan: (_) async => true,
+      onRollbackLocalPlan: () async {},
     );
 
     expect(result, PlanBillingController.purchaseUnavailable);
@@ -95,7 +100,8 @@ void main() {
     final result = await controller.purchasePlan(
       tier: PlanTier.starter,
       onActivateLocalPlan: (_) async {},
-      onPersistPlan: (_) async {},
+      onPersistPlan: (_) async => true,
+      onRollbackLocalPlan: () async {},
     );
 
     expect(result, PlanBillingController.purchaseMissingProductId);
@@ -113,7 +119,11 @@ void main() {
     final result = await controller.purchasePlan(
       tier: PlanTier.growth,
       onActivateLocalPlan: (tier) async => activatedTier = tier,
-      onPersistPlan: (tier) async => persistedTier = tier,
+      onPersistPlan: (tier) async {
+        persistedTier = tier;
+        return true;
+      },
+      onRollbackLocalPlan: () async {},
     );
 
     expect(result, isNull);
@@ -134,7 +144,8 @@ void main() {
 
     final result = await controller.restorePurchases(
       onActivateLocalPlan: (_) async {},
-      onPersistPlan: (_) async {},
+      onPersistPlan: (_) async => true,
+      onRollbackLocalPlan: () async {},
     );
 
     expect(result, PlanBillingController.restoreNotFound);
@@ -155,11 +166,59 @@ void main() {
 
     final result = await controller.restorePurchases(
       onActivateLocalPlan: (tier) async => activatedTier = tier,
-      onPersistPlan: (tier) async => persistedTier = tier,
+      onPersistPlan: (tier) async {
+        persistedTier = tier;
+        return true;
+      },
+      onRollbackLocalPlan: () async {},
     );
 
     expect(result, isNull);
     expect(activatedTier, PlanTier.unlimited);
     expect(persistedTier, PlanTier.unlimited);
+  });
+
+  test('purchase rolls back local plan when persistence fails', () async {
+    final gateway = _FakeGateway(available: true, purchaseResult: Object());
+    final controller = _controller(
+      supported: true,
+      gatewayFactory: () async => gateway,
+    );
+    PlanTier? activatedTier;
+    var rollbackCount = 0;
+
+    final result = await controller.purchasePlan(
+      tier: PlanTier.unlimited,
+      onActivateLocalPlan: (tier) async => activatedTier = tier,
+      onPersistPlan: (_) async => false,
+      onRollbackLocalPlan: () async => rollbackCount += 1,
+    );
+
+    expect(result, PlanBillingController.planSyncFailed);
+    expect(activatedTier, PlanTier.unlimited);
+    expect(rollbackCount, 1);
+  });
+
+  test('restore rolls back local plan when persistence fails', () async {
+    final gateway = _FakeGateway(
+      available: true,
+      restoreResult: const ['plus'],
+    );
+    final controller = _controller(
+      supported: true,
+      gatewayFactory: () async => gateway,
+    );
+    PlanTier? activatedTier;
+    var rollbackCount = 0;
+
+    final result = await controller.restorePurchases(
+      onActivateLocalPlan: (tier) async => activatedTier = tier,
+      onPersistPlan: (_) async => false,
+      onRollbackLocalPlan: () async => rollbackCount += 1,
+    );
+
+    expect(result, PlanBillingController.planSyncFailed);
+    expect(activatedTier, PlanTier.starter);
+    expect(rollbackCount, 1);
   });
 }

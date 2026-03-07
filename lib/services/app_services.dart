@@ -79,6 +79,7 @@ abstract class UserServiceApi {
     required String? email,
   });
   Future<UserProfile?> fetchUser(String userId);
+  Future<bool> supportsClientPlanManagement();
   Future<bool> updatePlan(String userId, String planTier);
 }
 
@@ -97,6 +98,11 @@ class DefaultUserService implements UserServiceApi {
   @override
   Future<UserProfile?> fetchUser(String userId) {
     return UserService.fetchUser(userId);
+  }
+
+  @override
+  Future<bool> supportsClientPlanManagement() {
+    return UserService.supportsClientPlanManagement();
   }
 
   @override

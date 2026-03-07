@@ -122,6 +122,12 @@ class _FailingSelectionService implements SelectionServiceApi {
 }
 
 class _NoopUserService implements UserServiceApi {
+  _NoopUserService({
+    this.clientPlanManagementEnabled = true,
+  });
+
+  final bool clientPlanManagementEnabled;
+
   @override
   Future<UserProfile?> upsertUser({
     required String userId,
@@ -132,6 +138,10 @@ class _NoopUserService implements UserServiceApi {
 
   @override
   Future<UserProfile?> fetchUser(String userId) async => null;
+
+  @override
+  Future<bool> supportsClientPlanManagement() async =>
+      clientPlanManagementEnabled;
 
   @override
   Future<bool> updatePlan(String userId, String planTier) async => true;
@@ -398,6 +408,112 @@ void main() {
     expect(state.selectionChangePending, isFalse);
     expect(state.dailySwapAddedId, isNull);
     expect(state.dailySwapRemovedId, isNull);
+  });
+
+  test('purchasePlan is blocked when secure server plan sync is unavailable',
+      () async {
+    SharedPreferences.setMockInitialValues({});
+    final services = AppServices(
+      archiveService: _NoopArchiveService(),
+      selectionService: _NoopSelectionService(),
+      userService: _NoopUserService(clientPlanManagementEnabled: false),
+      userStateService: _NoopUserStateService(),
+      transcriptService: _FakeTranscriptService(
+        const TranscriptResult(
+          text: 'noop',
+          summary: null,
+          source: 'captions',
+          partial: false,
+        ),
+      ),
+      youtubeApiFactory: (_) => YouTubeApi(authHeaders: const {}),
+      billingServiceFactory: () async => null,
+      transcriptCache: TranscriptCache.create(),
+      videoHistoryCache: VideoHistoryCache.create(),
+      selectionChangeCache: SelectionChangeCache.create(),
+      now: DateTime.now,
+    );
+
+    final container = ProviderContainer(
+      overrides: [
+        appControllerProvider.overrideWith(
+          (ref) => AppController(
+            ref,
+            services: services,
+            initialState: _signedInState(),
+            restoreSession: false,
+          ),
+        ),
+      ],
+    );
+    addTearDown(container.dispose);
+
+    final controller = container.read(appControllerProvider.notifier);
+    final result = await controller.purchasePlan(PlanTier.starter);
+
+    expect(result, AppController.planManagementUnavailable);
+    expect(
+      container.read(appControllerProvider).user?.plan.tier,
+      PlanTier.free,
+    );
+  });
+
+  test('purchasePlan returns external-management error for free downgrade',
+      () async {
+    SharedPreferences.setMockInitialValues({});
+    final services = AppServices(
+      archiveService: _NoopArchiveService(),
+      selectionService: _NoopSelectionService(),
+      userService: _NoopUserService(),
+      userStateService: _NoopUserStateService(),
+      transcriptService: _FakeTranscriptService(
+        const TranscriptResult(
+          text: 'noop',
+          summary: null,
+          source: 'captions',
+          partial: false,
+        ),
+      ),
+      youtubeApiFactory: (_) => YouTubeApi(authHeaders: const {}),
+      billingServiceFactory: () async => null,
+      transcriptCache: TranscriptCache.create(),
+      videoHistoryCache: VideoHistoryCache.create(),
+      selectionChangeCache: SelectionChangeCache.create(),
+      now: DateTime.now,
+    );
+
+    final initialState = AppStateData(
+      user: User(
+        id: 'user-1',
+        email: 'tester@example.com',
+        plan: const Plan(tier: PlanTier.growth),
+        createdAt: DateTime(2024, 1, 1),
+      ),
+      selectionCompleted: true,
+    );
+
+    final container = ProviderContainer(
+      overrides: [
+        appControllerProvider.overrideWith(
+          (ref) => AppController(
+            ref,
+            services: services,
+            initialState: initialState,
+            restoreSession: false,
+          ),
+        ),
+      ],
+    );
+    addTearDown(container.dispose);
+
+    final controller = container.read(appControllerProvider.notifier);
+    final result = await controller.purchasePlan(PlanTier.free);
+
+    expect(result, AppController.planManagedExternally);
+    expect(
+      container.read(appControllerProvider).user?.plan.tier,
+      PlanTier.growth,
+    );
   });
 
   test('finalizeChannelSelection is ignored while loading', () async {

@@ -38,4 +38,8 @@ fi
 TRANSCRIPT_HOST="${TRANSCRIPT_HOST:-127.0.0.1}"
 TRANSCRIPT_PORT="${TRANSCRIPT_PORT:-5055}"
 
+if [[ -n "${DATABASE_URL:-}" ]]; then
+  python "$ROOT_DIR/scripts/migrate_db.py"
+fi
+
 uvicorn server.app:app --host "$TRANSCRIPT_HOST" --port "$TRANSCRIPT_PORT"

@@ -25,6 +25,8 @@ class BillingServiceGateway implements PlanBillingGateway {
 
 typedef PlanBillingGatewayFactory = Future<PlanBillingGateway?> Function();
 typedef PlanActivationFn = Future<void> Function(PlanTier tier);
+typedef PlanPersistenceFn = Future<bool> Function(PlanTier tier);
+typedef PlanRollbackFn = Future<void> Function();
 
 class PlanBillingController {
   PlanBillingController({
@@ -42,6 +44,7 @@ class PlanBillingController {
   static const String purchaseMissingProductId = 'iap_missing_product_id';
   static const String purchaseUnavailable = 'iap_unavailable';
   static const String purchaseFailed = 'iap_failed';
+  static const String planSyncFailed = 'plan_sync_failed';
   static const String restoreUnavailable = 'iap_restore_unavailable';
   static const String restoreNone = 'iap_restore_none';
   static const String restoreNotFound = 'iap_restore_not_found';
@@ -57,7 +60,8 @@ class PlanBillingController {
   Future<String?> purchasePlan({
     required PlanTier tier,
     required PlanActivationFn onActivateLocalPlan,
-    required PlanActivationFn onPersistPlan,
+    required PlanPersistenceFn onPersistPlan,
+    required PlanRollbackFn onRollbackLocalPlan,
   }) async {
     if (tier == PlanTier.free) {
       await onActivateLocalPlan(tier);
@@ -83,13 +87,18 @@ class PlanBillingController {
     }
 
     await onActivateLocalPlan(tier);
-    await onPersistPlan(tier);
+    final persisted = await onPersistPlan(tier);
+    if (!persisted) {
+      await onRollbackLocalPlan();
+      return planSyncFailed;
+    }
     return null;
   }
 
   Future<String?> restorePurchases({
     required PlanActivationFn onActivateLocalPlan,
-    required PlanActivationFn onPersistPlan,
+    required PlanPersistenceFn onPersistPlan,
+    required PlanRollbackFn onRollbackLocalPlan,
   }) async {
     if (!_isIapSupportedPlatform) {
       return restoreUnavailable;
@@ -108,7 +117,11 @@ class PlanBillingController {
       return restoreNotFound;
     }
     await onActivateLocalPlan(restoredTier);
-    await onPersistPlan(restoredTier);
+    final persisted = await onPersistPlan(restoredTier);
+    if (!persisted) {
+      await onRollbackLocalPlan();
+      return planSyncFailed;
+    }
     return null;
   }
 

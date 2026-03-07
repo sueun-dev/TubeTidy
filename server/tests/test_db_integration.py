@@ -55,7 +55,7 @@ class DatabaseIntegrationTest(unittest.TestCase):
 
         importlib.reload(db)
         importlib.reload(app)
-        db.init_db()
+        db.migrate_db()
 
         cls.client = TestClient(app.app)
 
@@ -162,8 +162,8 @@ class DatabaseIntegrationTest(unittest.TestCase):
             'selected channel limit exceeded for current plan',
         )
 
-    def test_get_selection_trims_legacy_over_limit_state(self) -> None:
-        """Selection reads should trim and clean up legacy over-limit rows."""
+    def test_get_selection_trims_legacy_over_limit_response_only(self) -> None:
+        """Selection reads should trim response payloads without mutating rows."""
         import server.db as db_module
         import server.models as models
 
@@ -207,7 +207,7 @@ class DatabaseIntegrationTest(unittest.TestCase):
             )
         self.assertEqual(
             [row.channel_id for row in rows],
-            ['channel-a', 'channel-b', 'channel-c'],
+            ['channel-a', 'channel-b', 'channel-c', 'channel-d'],
         )
 
     def test_archive_roundtrip(self) -> None:
@@ -394,6 +394,47 @@ class DatabaseIntegrationTest(unittest.TestCase):
             row_ids = [row.channel_id for row in rows]
         self.assertEqual(len(row_ids), len(set(row_ids)))
         self.assertEqual(set(row_ids), final_selected)
+
+    def test_user_upsert_survives_race_with_state_write(self) -> None:
+        """Concurrent profile/state writes should not 500 on first sign-in."""
+        import server.app as app_module
+
+        user_id = f'user_{uuid.uuid4().hex}'
+        barrier = threading.Barrier(3)
+
+        def _post_user_upsert():
+            with TestClient(app_module.app) as client:
+                barrier.wait(timeout=5)
+                return client.post(
+                    '/user/upsert',
+                    json={
+                        'user_id': user_id,
+                        'email': 'race@example.com',
+                    },
+                )
+
+        def _post_user_state():
+            with TestClient(app_module.app) as client:
+                barrier.wait(timeout=5)
+                return client.post(
+                    '/user/state',
+                    json={
+                        'user_id': user_id,
+                        'selection_change_day': 0,
+                        'selection_changes_today': 0,
+                        'opened_video_ids': ['abc12345xyz'],
+                    },
+                )
+
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            future_upsert = executor.submit(_post_user_upsert)
+            future_state = executor.submit(_post_user_state)
+            barrier.wait(timeout=5)
+            upsert_response = future_upsert.result(timeout=10)
+            state_response = future_state.result(timeout=10)
+
+        self.assertEqual(upsert_response.status_code, 200)
+        self.assertEqual(state_response.status_code, 200)
 
 
 if __name__ == '__main__':
