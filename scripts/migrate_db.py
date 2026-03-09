@@ -11,10 +11,16 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from server.db import check_db, is_db_enabled, migrate_db, validate_schema
-
 
 def main() -> int:
+    """Run explicit schema migration and validation checks."""
+    from server.db import (  # pylint: disable=import-outside-toplevel
+        check_db,
+        is_db_enabled,
+        migrate_db,
+        validate_schema,
+    )
+
     if not is_db_enabled():
         print('DATABASE_URL is not set. Nothing to migrate.')
         return 0

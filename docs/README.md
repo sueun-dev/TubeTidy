@@ -1,6 +1,7 @@
 # Documentation Index
 
 ## Structure
+- `architecture/`: style and structural decisions
 - `operations/`: release checklist, infra and deployment status
 - `reports/`: implementation and refactoring reports
 - `security/`: security hardening checklist

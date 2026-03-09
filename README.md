@@ -23,6 +23,7 @@ AI-powered YouTube summary app (Flutter) that syncs subscriptions, extracts capt
 
 ## Documentation
 - `docs/README.md`: documentation index
+- `docs/architecture/`: style and structural decisions
 - `docs/operations/`: runbooks, release checklist, infra status
 - `docs/reports/`: refactoring/change reports
 - `docs/security/`: security checklist and release hardening notes
@@ -142,6 +143,7 @@ python3 -m http.server 5301 --bind 127.0.0.1 --directory build/web
 
 ## Testing
 ```bash
+./scripts/check_quality.sh
 flutter test
 ./.venv/bin/python -m unittest server.tests.test_app
 DATABASE_URL=postgresql+psycopg2://youtube_summary:youtube_summary@127.0.0.1:5433/youtube_summary python3 scripts/migrate_db.py

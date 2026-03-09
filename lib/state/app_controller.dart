@@ -627,8 +627,7 @@ class AppController extends StateNotifier<AppStateData> {
       PlanBillingController.purchaseUnavailable;
   static const String purchaseFailed = PlanBillingController.purchaseFailed;
   static const String planSyncFailed = PlanBillingController.planSyncFailed;
-  static const String planManagementUnavailable =
-      'plan_management_unavailable';
+  static const String planManagementUnavailable = 'plan_management_unavailable';
   static const String planManagedExternally = 'plan_managed_externally';
   static const String restoreUnavailable =
       PlanBillingController.restoreUnavailable;

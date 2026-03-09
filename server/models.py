@@ -64,7 +64,11 @@ class UserChannel(Base):
     """Channel selection mapping for users."""
     __tablename__ = 'user_channels'
     __table_args__ = (
-        UniqueConstraint('user_id', 'channel_id', name='uq_user_channels_user_channel'),
+        UniqueConstraint(
+            'user_id',
+            'channel_id',
+            name='uq_user_channels_user_channel',
+        ),
         Index('ix_user_channels_user_selected', 'user_id', 'is_selected'),
     )
 
