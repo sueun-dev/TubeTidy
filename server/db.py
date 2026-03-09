@@ -159,16 +159,22 @@ def _ensure_optional_columns(conn) -> None:
     """Add columns introduced after initial release when they are missing."""
     inspector = inspect(conn)
     table_columns = {
-        table_name: {column['name'] for column in inspector.get_columns(table_name)}
+        table_name: {
+            column['name']
+            for column in inspector.get_columns(table_name)
+        }
         for table_name in inspector.get_table_names()
     }
 
-    if 'videos' in table_columns and 'thumbnail_url' not in table_columns['videos']:
+    if (
+        'videos' in table_columns
+        and 'thumbnail_url' not in table_columns['videos']
+    ):
         conn.execute(text('ALTER TABLE videos ADD COLUMN thumbnail_url TEXT'))
 
 
 def validate_schema() -> tuple[bool, Optional[str]]:
-    """Validate that the live database has the minimum schema required by the app."""
+    """Validate that the live database has the required application schema."""
     if _ENGINE is None:
         return True, None
 
@@ -195,13 +201,17 @@ def validate_schema() -> tuple[bool, Optional[str]]:
 
             for table_name, columns in required_columns.items():
                 table_columns = {
-                    column['name'] for column in inspector.get_columns(table_name)
+                    column['name']
+                    for column in inspector.get_columns(table_name)
                 }
                 missing_columns = sorted(columns - table_columns)
                 if missing_columns:
                     return (
                         False,
-                        f"{table_name} missing columns: {', '.join(missing_columns)}",
+                        (
+                            f'{table_name} missing columns: '
+                            f"{', '.join(missing_columns)}"
+                        ),
                     )
     except SQLAlchemyError as exc:
         return False, f'schema inspection failed: {exc.__class__.__name__}'
