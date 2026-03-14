@@ -9,6 +9,10 @@ from fastapi import HTTPException
 os.environ.setdefault('BACKEND_REQUIRE_AUTH', 'false')
 
 import server.app as backend
+from server.transcript_utils import (
+    build_transcript_cache_key as _build_transcript_cache_key,
+    sanitize_max_chars as _sanitize_max_chars,
+)
 
 
 _SANITIZE_MAX_CHARS_CASES = [None] + list(range(-600, 10601, 25))
@@ -85,7 +89,7 @@ class LogicMatrixTest(unittest.TestCase):
                         min(backend.TRANSCRIPT_MAX_MAX_CHARS, int(raw)),
                     )
                 )
-                self.assertEqual(backend._sanitize_max_chars(raw), expected)
+                self.assertEqual(_sanitize_max_chars(raw), expected)
 
     def test_selection_plan_limit_matrix(self) -> None:
         """Selection limits should accept only counts allowed by the tier."""
@@ -176,7 +180,7 @@ class LogicMatrixTest(unittest.TestCase):
                 summarize=summarize,
                 summary_lines=summary_lines,
             ):
-                key = backend._build_transcript_cache_key(
+                key = _build_transcript_cache_key(
                     video_id=video_id,
                     max_chars=max_chars,
                     summarize=summarize,

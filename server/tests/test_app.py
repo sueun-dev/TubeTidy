@@ -12,11 +12,13 @@ os.environ.setdefault('BACKEND_REQUIRE_AUTH', 'false')
 
 import server.app as backend
 from server.app import (
-    _build_transcript_cache_key,
-    _sanitize_max_chars,
     app,
     normalize_summary,
     trim_text,
+)
+from server.transcript_utils import (
+    build_transcript_cache_key as _build_transcript_cache_key,
+    sanitize_max_chars as _sanitize_max_chars,
 )
 
 
@@ -146,10 +148,16 @@ class AppTestCase(unittest.TestCase):
                 output_path.write_text('audio', encoding='utf-8')
                 return {'id': 'abc12345xyz'}
 
-        with patch.object(backend, 'YTDLP_COOKIES_FROM_BROWSER', None):
-            with patch.object(backend, 'YTDLP_COOKIES_PATH', None):
-                with patch('server.app.YoutubeDL', _FakeYoutubeDL):
-                    audio_path, error = backend.download_audio('abc12345xyz')
+        from server import transcript_utils as tu
+        with patch.object(tu, 'YTDLP_COOKIES_FROM_BROWSER', None):
+            with patch.object(tu, 'YTDLP_COOKIES_PATH', None):
+                audio_path, error = tu.download_audio(
+                    'abc12345xyz',
+                    cookies_from_browser=None,
+                    cookies_path=None,
+                    youtube_dl_cls=_FakeYoutubeDL,
+                    download_error_cls=backend.DownloadError,
+                )
 
         self.assertIsNone(error)
         self.assertIsNotNone(audio_path)
@@ -252,9 +260,9 @@ class AppTestCase(unittest.TestCase):
         with patch.object(backend, 'TRANSCRIPT_SEMAPHORE', threading.Semaphore(1)):
             with patch.object(backend, 'TRANSCRIPT_QUEUE_TIMEOUT', 0):
                 with patch.object(backend, 'OPENAI_API_KEY', None):
-                    with patch('server.app.fetch_caption_text', return_value=None):
+                    with patch('server.transcript_utils.fetch_caption_text', return_value=None):
                         with patch(
-                            'server.app.fetch_caption_text_via_ytdlp',
+                            'server.transcript_utils.fetch_caption_text_via_ytdlp',
                             return_value=None,
                         ):
                             response = self.client.post(
