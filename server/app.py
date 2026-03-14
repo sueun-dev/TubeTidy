@@ -173,8 +173,13 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=list(ALLOWED_ORIGINS),
     allow_credentials=ALLOW_CREDENTIALS,
-    allow_methods=['*'],
-    allow_headers=['*'],
+    allow_methods=['GET', 'POST', 'OPTIONS'],
+    allow_headers=[
+        'Authorization',
+        'Content-Type',
+        'X-Request-Id',
+        'X-Plan-Update-Token',
+    ],
 )
 
 
@@ -182,7 +187,11 @@ app.add_middleware(
 async def apply_security_headers(request: Request, call_next):
     """Apply basic security headers and correlation id."""
     response = await call_next(request)
-    request_id = request.headers.get('X-Request-Id') or str(uuid.uuid4())
+    raw_request_id = request.headers.get('X-Request-Id')
+    if raw_request_id and re.fullmatch(r'[A-Za-z0-9_\-\.]{1,128}', raw_request_id):
+        request_id = raw_request_id
+    else:
+        request_id = str(uuid.uuid4())
     response.headers.setdefault('X-Request-Id', request_id)
     response.headers.setdefault('X-Content-Type-Options', 'nosniff')
     response.headers.setdefault('X-Frame-Options', 'DENY')
@@ -572,7 +581,14 @@ def _verify_google_user(token: str) -> str:
     with AUTH_CACHE_LOCK:
         AUTH_CACHE[token] = (expiry, subject)
         if len(AUTH_CACHE) > AUTH_CACHE_MAX_ITEMS:
-            AUTH_CACHE.pop(next(iter(AUTH_CACHE)))
+            now_ts = time.time()
+            expired_keys = [
+                k for k, (exp, _) in AUTH_CACHE.items() if exp <= now_ts
+            ]
+            for k in expired_keys:
+                AUTH_CACHE.pop(k, None)
+            if len(AUTH_CACHE) > AUTH_CACHE_MAX_ITEMS:
+                AUTH_CACHE.pop(next(iter(AUTH_CACHE)))
     return subject
 
 
@@ -610,12 +626,18 @@ def _has_trusted_plan_update_access(request: Request) -> bool:
     )
 
 
+_IP_PATTERN = re.compile(
+    r'^(?:\d{1,3}\.){3}\d{1,3}$'          # IPv4
+    r'|^[0-9a-fA-F:]{2,45}$'              # IPv6 (colon-hex, including ::)
+)
+
+
 def _resolve_client_id(request: Request) -> str:
     if TRUST_PROXY_HEADERS:
         forwarded = request.headers.get('x-forwarded-for', '')
         if forwarded:
             candidate = forwarded.split(',')[0].strip()
-            if candidate:
+            if candidate and _IP_PATTERN.match(candidate):
                 return candidate[:128]
     client = request.client.host if request.client else 'unknown'
     return (client or 'unknown')[:128]
@@ -719,7 +741,18 @@ def _build_transcript_payload(
     max_chars: int,
 ) -> dict[str, Any]:
     text, partial = trim_text(source_text, max_chars)
-    summary = build_summary(source_text, summary_lines) if summarize else None
+    summary = (
+        transcript_utils.build_summary(
+            source_text,
+            summary_lines,
+            api_key=OPENAI_API_KEY,
+            input_chars=OPENAI_SUMMARY_INPUT_CHARS,
+            model=OPENAI_SUMMARY_MODEL,
+            max_tokens=OPENAI_SUMMARY_MAX_TOKENS,
+        )
+        if summarize
+        else None
+    )
     return {
         'text': text,
         'summary': summary,
@@ -732,7 +765,7 @@ def _resolve_audio_download_detail(error: Optional[str]) -> str:
     detail = '음성 다운로드에 실패했습니다.'
     if not error:
         return detail
-    if is_membership_error(error):
+    if transcript_utils.is_membership_error(error):
         return 'You might not have membership for this video.'
     if 'HTTP Error 403' in error or 'Forbidden' in error:
         return (
@@ -766,8 +799,8 @@ def transcript(
     principal = _resolve_transcript_principal(request, authorization)
     _enforce_transcript_rate_limit(principal)
     video_id = _sanitize_video_id(req.video_id)
-    max_chars = _sanitize_max_chars(req.max_chars)
-    cache_key = _build_transcript_cache_key(
+    max_chars = sanitize_max_chars(req.max_chars)
+    cache_key = build_transcript_cache_key(
         video_id=video_id,
         max_chars=max_chars,
         summarize=bool(req.summarize),
@@ -779,9 +812,16 @@ def transcript(
         return {**cached, 'cached': True}
 
     with _transcript_slot(TRANSCRIPT_QUEUE_TIMEOUT):
-        caption_text = fetch_caption_text(video_id)
+        caption_text = transcript_utils.fetch_caption_text(video_id)
         if not caption_text:
-            caption_text = fetch_caption_text_via_ytdlp(video_id)
+            caption_text = transcript_utils.fetch_caption_text_via_ytdlp(
+                video_id,
+                cookies_from_browser=YTDLP_COOKIES_FROM_BROWSER,
+                cookies_path=YTDLP_COOKIES_PATH,
+                player_client_list=YTDLP_PLAYER_CLIENT_LIST,
+                socket_timeout_seconds=YTDLP_SOCKET_TIMEOUT_SECONDS,
+                youtube_dl_cls=YoutubeDL,
+            )
 
         if caption_text:
             payload = _build_transcript_payload(
@@ -800,7 +840,15 @@ def transcript(
                 detail='OPENAI_API_KEY가 설정되어 있지 않습니다.',
             )
 
-        audio_path, error = download_audio(video_id)
+        audio_path, error = transcript_utils.download_audio(
+            video_id,
+            cookies_from_browser=YTDLP_COOKIES_FROM_BROWSER,
+            cookies_path=YTDLP_COOKIES_PATH,
+            player_client_list=YTDLP_PLAYER_CLIENT_LIST,
+            socket_timeout_seconds=YTDLP_SOCKET_TIMEOUT_SECONDS,
+            youtube_dl_cls=YoutubeDL,
+            download_error_cls=DownloadError,
+        )
         if audio_path is None:
             raise HTTPException(
                 status_code=500,
@@ -808,7 +856,9 @@ def transcript(
             )
 
         try:
-            transcript_text = transcribe_audio(audio_path)
+            transcript_text = transcript_utils.transcribe_audio(
+                audio_path, api_key=OPENAI_API_KEY,
+            )
         finally:
             try:
                 os.remove(audio_path)
@@ -862,6 +912,49 @@ def list_archives(
     return {'items': load_archives_file(user_id)}
 
 
+def _build_db_archive_response(
+    session: Any,
+    video_id: str,
+    archive: Archive,
+    metadata: dict[str, Optional[str]],
+) -> dict[str, Any]:
+    """Build an archive response dict from DB records."""
+    video = session.query(Video).filter(Video.id == video_id).first()
+    channel = (
+        session.query(Channel).filter(Channel.id == video.channel_id).first()
+        if video is not None
+        else None
+    )
+    return {
+        'archived': True,
+        'video_id': video_id,
+        'archived_at': int(archive.archived_at.timestamp() * 1000),
+        'title': (
+            video.title if video is not None
+            else (metadata.get('title') or ARCHIVE_PLACEHOLDER_VIDEO_TITLE)
+        ),
+        'thumbnail_url': (
+            video.thumbnail_url if video is not None
+            else metadata.get('thumbnail_url')
+        ),
+        'channel_id': (
+            video.channel_id if video is not None
+            else (metadata.get('channel_id') or ARCHIVE_PLACEHOLDER_CHANNEL_ID)
+        ),
+        'channel_title': (
+            channel.title if channel is not None
+            else (
+                metadata.get('channel_title')
+                or ARCHIVE_PLACEHOLDER_CHANNEL_TITLE
+            )
+        ),
+        'channel_thumbnail_url': (
+            channel.thumbnail_url if channel is not None
+            else metadata.get('channel_thumbnail_url')
+        ),
+    }
+
+
 @app.post('/archives/toggle')
 def toggle_archive(
     req: ArchiveToggleRequest,
@@ -897,9 +990,7 @@ def toggle_archive(
                 if not should_archive:
                     if existing:
                         session.delete(existing)
-                        session.commit()
-                    else:
-                        session.commit()
+                    session.commit()
                     return {'archived': False, 'video_id': video_id}
 
                 upsert_archive_video(session, video_id, metadata)
@@ -907,43 +998,11 @@ def toggle_archive(
                     existing = Archive(user_id=user_id, video_id=video_id)
                     session.add(existing)
                 session.flush()
-                video = (
-                    session.query(Video).filter(Video.id == video_id).first()
-                )
-                channel = (
-                    session.query(Channel)
-                    .filter(Channel.id == video.channel_id)
-                    .first()
-                    if video is not None
-                    else None
+                result = _build_db_archive_response(
+                    session, video_id, existing, metadata,
                 )
                 session.commit()
-                return {
-                    'archived': True,
-                    'video_id': video_id,
-                    'archived_at': int(existing.archived_at.timestamp() * 1000),
-                    'title': (
-                        video.title
-                        if video is not None
-                        else ARCHIVE_PLACEHOLDER_VIDEO_TITLE
-                    ),
-                    'thumbnail_url': (
-                        video.thumbnail_url if video is not None else None
-                    ),
-                    'channel_id': (
-                        video.channel_id
-                        if video is not None
-                        else ARCHIVE_PLACEHOLDER_CHANNEL_ID
-                    ),
-                    'channel_title': (
-                        channel.title
-                        if channel is not None
-                        else ARCHIVE_PLACEHOLDER_CHANNEL_TITLE
-                    ),
-                    'channel_thumbnail_url': (
-                        channel.thumbnail_url if channel is not None else None
-                    ),
-                }
+                return result
         except IntegrityError as exc:
             if req.archived is True:
                 try:
@@ -958,50 +1017,9 @@ def toggle_archive(
                             .first()
                         )
                         if existing is not None:
-                            video = (
-                                session.query(Video)
-                                .filter(Video.id == video_id)
-                                .first()
+                            return _build_db_archive_response(
+                                session, video_id, existing, metadata,
                             )
-                            channel = (
-                                session.query(Channel)
-                                .filter(Channel.id == video.channel_id)
-                                .first()
-                                if video is not None
-                                else None
-                            )
-                            return {
-                                'archived': True,
-                                'video_id': video_id,
-                                'archived_at': int(
-                                    existing.archived_at.timestamp() * 1000
-                                ),
-                                'title': (
-                                    video.title
-                                    if video
-                                    else metadata['title']
-                                ),
-                                'thumbnail_url': (
-                                    video.thumbnail_url
-                                    if video is not None
-                                    else metadata['thumbnail_url']
-                                ),
-                                'channel_id': (
-                                    video.channel_id
-                                    if video is not None
-                                    else metadata['channel_id']
-                                ),
-                                'channel_title': (
-                                    channel.title
-                                    if channel is not None
-                                    else metadata['channel_title']
-                                ),
-                                'channel_thumbnail_url': (
-                                    channel.thumbnail_url
-                                    if channel is not None
-                                    else metadata['channel_thumbnail_url']
-                                ),
-                            }
                 except SQLAlchemyError:
                     pass
             raise HTTPException(
@@ -1350,72 +1368,3 @@ def save_selection(
         ) from exc
 
 
-def _sanitize_max_chars(max_chars: Optional[int]) -> int:
-    return sanitize_max_chars(max_chars)
-
-
-def _build_transcript_cache_key(
-    *,
-    video_id: str,
-    max_chars: int,
-    summarize: bool,
-    summary_lines: Optional[int],
-) -> str:
-    return build_transcript_cache_key(
-        video_id=video_id,
-        max_chars=max_chars,
-        summarize=summarize,
-        summary_lines=summary_lines,
-    )
-
-
-def build_summary(text: str, lines: Optional[int]) -> Optional[str]:
-    """Build a summary using the current backend configuration."""
-    return transcript_utils.build_summary(
-        text,
-        lines,
-        api_key=OPENAI_API_KEY,
-        input_chars=OPENAI_SUMMARY_INPUT_CHARS,
-        model=OPENAI_SUMMARY_MODEL,
-        max_tokens=OPENAI_SUMMARY_MAX_TOKENS,
-    )
-
-
-def fetch_caption_text(video_id: str) -> Optional[str]:
-    """Fetch captions via the transcript helper module."""
-    return transcript_utils.fetch_caption_text(video_id)
-
-
-def fetch_caption_text_via_ytdlp(video_id: str) -> Optional[str]:
-    """Fetch captions via yt-dlp with app-level dependency injection."""
-    return transcript_utils.fetch_caption_text_via_ytdlp(
-        video_id,
-        cookies_from_browser=YTDLP_COOKIES_FROM_BROWSER,
-        cookies_path=YTDLP_COOKIES_PATH,
-        player_client_list=YTDLP_PLAYER_CLIENT_LIST,
-        socket_timeout_seconds=YTDLP_SOCKET_TIMEOUT_SECONDS,
-        youtube_dl_cls=YoutubeDL,
-    )
-
-
-def download_audio(video_id: str) -> tuple[Optional[str], Optional[str]]:
-    """Download audio with the app's yt-dlp configuration."""
-    return transcript_utils.download_audio(
-        video_id,
-        cookies_from_browser=YTDLP_COOKIES_FROM_BROWSER,
-        cookies_path=YTDLP_COOKIES_PATH,
-        player_client_list=YTDLP_PLAYER_CLIENT_LIST,
-        socket_timeout_seconds=YTDLP_SOCKET_TIMEOUT_SECONDS,
-        youtube_dl_cls=YoutubeDL,
-        download_error_cls=DownloadError,
-    )
-
-
-def is_membership_error(message: str) -> bool:
-    """Check whether a download error is a members-only restriction."""
-    return transcript_utils.is_membership_error(message)
-
-
-def transcribe_audio(path: str) -> Optional[str]:
-    """Transcribe audio using the current OpenAI API key."""
-    return transcript_utils.transcribe_audio(path, api_key=OPENAI_API_KEY)

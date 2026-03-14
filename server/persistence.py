@@ -29,15 +29,32 @@ from .models import Archive, Channel, User, UserChannel, UserState, Video
 from .schemas import SelectionRequest
 
 
+# ---------------------------------------------------------------------------
+# Dialect helpers – collapse the repeated Postgres/SQLite/generic branches.
+# ---------------------------------------------------------------------------
+
+def _dialect_name(session: Any) -> str:
+    dialect = getattr(getattr(session, 'bind', None), 'dialect', None)
+    return getattr(dialect, 'name', '')
+
+
+def _dialect_insert(session: Any):
+    """Return the dialect-specific ``insert`` function, or ``None``."""
+    name = _dialect_name(session)
+    if name == 'postgresql' and POSTGRES_INSERT is not None:
+        return POSTGRES_INSERT
+    if name == 'sqlite' and SQLITE_INSERT is not None:
+        return SQLITE_INSERT
+    return None
+
+
 def _is_postgres_session(session: Any) -> bool:
-    dialect_name = getattr(getattr(session, 'bind', None), 'dialect', None)
-    return getattr(dialect_name, 'name', '') == 'postgresql'
+    return _dialect_name(session) == 'postgresql'
 
 
-def _is_sqlite_session(session: Any) -> bool:
-    dialect_name = getattr(getattr(session, 'bind', None), 'dialect', None)
-    return getattr(dialect_name, 'name', '') == 'sqlite'
-
+# ---------------------------------------------------------------------------
+# Normalisation helpers
+# ---------------------------------------------------------------------------
 
 def normalize_selection_request(
     req: SelectionRequest,
@@ -85,20 +102,16 @@ def normalize_selection_request(
     return normalized_channels, normalized_selected_ids
 
 
+# ---------------------------------------------------------------------------
+# User helpers
+# ---------------------------------------------------------------------------
+
 def ensure_user_exists(session: Any, user_id: str) -> None:
     """Create the user row if it does not exist."""
-    if _is_postgres_session(session) and POSTGRES_INSERT is not None:
+    di = _dialect_insert(session)
+    if di is not None:
         stmt = (
-            POSTGRES_INSERT(User.__table__)
-            .values(id=user_id, plan_tier='free')
-            .on_conflict_do_nothing(index_elements=['id'])
-        )
-        session.execute(stmt)
-        return
-
-    if _is_sqlite_session(session) and SQLITE_INSERT is not None:
-        stmt = (
-            SQLITE_INSERT(User.__table__)
+            di(User.__table__)
             .values(id=user_id, plan_tier='free')
             .on_conflict_do_nothing(index_elements=['id'])
         )
@@ -118,31 +131,11 @@ def upsert_user_profile(
     email: Optional[str],
 ) -> User:
     """Create or update the user profile row."""
-    payload = {
-        'id': user_id,
-        'email': email,
-        'plan_tier': 'free',
-    }
-
-    if _is_postgres_session(session) and POSTGRES_INSERT is not None:
+    di = _dialect_insert(session)
+    if di is not None:
         stmt = (
-            POSTGRES_INSERT(User.__table__)
-            .values(**payload)
-            .on_conflict_do_update(
-                index_elements=['id'],
-                set_={'email': email},
-            )
-        )
-        session.execute(stmt)
-        user = session.query(User).filter(User.id == user_id).first()
-        if user is None:
-            raise HTTPException(status_code=500, detail='user upsert failed')
-        return user
-
-    if _is_sqlite_session(session) and SQLITE_INSERT is not None:
-        stmt = (
-            SQLITE_INSERT(User.__table__)
-            .values(**payload)
+            di(User.__table__)
+            .values(id=user_id, email=email, plan_tier='free')
             .on_conflict_do_update(
                 index_elements=['id'],
                 set_={'email': email},
@@ -167,6 +160,10 @@ def upsert_user_profile(
         user.email = email
     return user
 
+
+# ---------------------------------------------------------------------------
+# Channel helpers
+# ---------------------------------------------------------------------------
 
 def upsert_channels(
     session: Any,
@@ -222,6 +219,10 @@ def upsert_channels(
         existing.thumbnail_url = payload['thumbnail_url']
 
 
+# ---------------------------------------------------------------------------
+# User-channel link helpers
+# ---------------------------------------------------------------------------
+
 def sync_user_channel_links(
     session: Any,
     user_id: str,
@@ -229,7 +230,9 @@ def sync_user_channel_links(
 ) -> None:
     """Replace the selected channel link set for a user."""
     now = datetime.now(timezone.utc)
-    if _is_postgres_session(session) and POSTGRES_INSERT is not None:
+    di = _dialect_insert(session)
+
+    if di is not None:
         if selected_ids_sorted:
             (
                 session.query(UserChannel)
@@ -249,7 +252,7 @@ def sync_user_channel_links(
                 for channel_id in selected_ids_sorted
             ]
             stmt = (
-                POSTGRES_INSERT(UserChannel.__table__)
+                di(UserChannel.__table__)
                 .values(values)
                 .on_conflict_do_update(
                     index_elements=['user_id', 'channel_id'],
@@ -293,6 +296,10 @@ def sync_user_channel_links(
         existing_link.is_selected = True
         existing_link.synced_at = now
 
+
+# ---------------------------------------------------------------------------
+# Archive helpers
+# ---------------------------------------------------------------------------
 
 def upsert_archive_video(
     session: Any,
@@ -400,6 +407,10 @@ def serialize_archive_items(
     return items
 
 
+# ---------------------------------------------------------------------------
+# User-state helpers
+# ---------------------------------------------------------------------------
+
 def upsert_user_state_row(
     session: Any,
     user_id: str,
@@ -418,36 +429,21 @@ def upsert_user_state_row(
         'opened_video_ids': encoded_opened_video_ids,
         'updated_at': now,
     }
+    update_set = {
+        'selection_change_day': selection_change_day,
+        'selection_changes_today': selection_changes_today,
+        'opened_video_ids': encoded_opened_video_ids,
+        'updated_at': now,
+    }
 
-    if _is_postgres_session(session) and POSTGRES_INSERT is not None:
+    di = _dialect_insert(session)
+    if di is not None:
         stmt = (
-            POSTGRES_INSERT(UserState.__table__)
+            di(UserState.__table__)
             .values(**payload)
             .on_conflict_do_update(
                 index_elements=['user_id'],
-                set_={
-                    'selection_change_day': selection_change_day,
-                    'selection_changes_today': selection_changes_today,
-                    'opened_video_ids': encoded_opened_video_ids,
-                    'updated_at': now,
-                },
-            )
-        )
-        session.execute(stmt)
-        return
-
-    if _is_sqlite_session(session) and SQLITE_INSERT is not None:
-        stmt = (
-            SQLITE_INSERT(UserState.__table__)
-            .values(**payload)
-            .on_conflict_do_update(
-                index_elements=['user_id'],
-                set_={
-                    'selection_change_day': selection_change_day,
-                    'selection_changes_today': selection_changes_today,
-                    'opened_video_ids': encoded_opened_video_ids,
-                    'updated_at': now,
-                },
+                set_=update_set,
             )
         )
         session.execute(stmt)

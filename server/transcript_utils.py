@@ -255,6 +255,28 @@ def save_archives_file(user_id: str, items: list[dict]) -> None:
         pass
 
 
+def _build_archive_entry(
+    video_id: str,
+    archived_at: int,
+    metadata: dict[str, Optional[str]],
+    fallback: Optional[dict] = None,
+) -> dict:
+    """Build a consistent archive entry dict, merging metadata with fallback."""
+    fb = fallback or {}
+    return {
+        'video_id': video_id,
+        'archived_at': archived_at,
+        'title': metadata['title'] or fb.get('title'),
+        'thumbnail_url': metadata['thumbnail_url'] or fb.get('thumbnail_url'),
+        'channel_id': metadata['channel_id'] or fb.get('channel_id'),
+        'channel_title': metadata['channel_title'] or fb.get('channel_title'),
+        'channel_thumbnail_url': (
+            metadata['channel_thumbnail_url']
+            or fb.get('channel_thumbnail_url')
+        ),
+    }
+
+
 def toggle_archive_file(
     user_id: str,
     video_id: str,
@@ -285,61 +307,17 @@ def toggle_archive_file(
         archived_at = existing_entry.get('archived_at')
         if not isinstance(archived_at, int):
             archived_at = int(time.time() * 1000)
-        items[existing_index] = {
-            'video_id': video_id,
-            'archived_at': archived_at,
-            'title': metadata['title'] or existing_entry.get('title'),
-            'thumbnail_url': (
-                metadata['thumbnail_url'] or existing_entry.get('thumbnail_url')
-            ),
-            'channel_id': (
-                metadata['channel_id'] or existing_entry.get('channel_id')
-            ),
-            'channel_title': (
-                metadata['channel_title'] or existing_entry.get('channel_title')
-            ),
-            'channel_thumbnail_url': (
-                metadata['channel_thumbnail_url']
-                or existing_entry.get('channel_thumbnail_url')
-            ),
-        }
-        save_archives_file(user_id, items)
-        return {
-            'archived': True,
-            'video_id': video_id,
-            'archived_at': archived_at,
-            'title': items[existing_index].get('title'),
-            'thumbnail_url': items[existing_index].get('thumbnail_url'),
-            'channel_id': items[existing_index].get('channel_id'),
-            'channel_title': items[existing_index].get('channel_title'),
-            'channel_thumbnail_url': items[existing_index].get(
-                'channel_thumbnail_url'
-            ),
-        }
+        entry = _build_archive_entry(
+            video_id, archived_at, metadata, fallback=existing_entry,
+        )
+        items[existing_index] = entry
+    else:
+        archived_at = int(time.time() * 1000)
+        entry = _build_archive_entry(video_id, archived_at, metadata)
+        items.append(entry)
 
-    archived_at = int(time.time() * 1000)
-    items.append(
-        {
-            'video_id': video_id,
-            'archived_at': archived_at,
-            'title': metadata['title'],
-            'thumbnail_url': metadata['thumbnail_url'],
-            'channel_id': metadata['channel_id'],
-            'channel_title': metadata['channel_title'],
-            'channel_thumbnail_url': metadata['channel_thumbnail_url'],
-        }
-    )
     save_archives_file(user_id, items)
-    return {
-        'archived': True,
-        'video_id': video_id,
-        'archived_at': archived_at,
-        'title': metadata['title'],
-        'thumbnail_url': metadata['thumbnail_url'],
-        'channel_id': metadata['channel_id'],
-        'channel_title': metadata['channel_title'],
-        'channel_thumbnail_url': metadata['channel_thumbnail_url'],
-    }
+    return {'archived': True, **entry}
 
 
 def fetch_caption_text(video_id: str) -> Optional[str]:

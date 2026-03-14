@@ -228,5 +228,8 @@ def get_session():
     session = _SESSION_LOCAL()
     try:
         yield session
+    except Exception:
+        session.rollback()
+        raise
     finally:
         session.close()
