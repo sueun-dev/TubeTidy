@@ -604,9 +604,13 @@ def parse_json3(raw: str) -> Optional[str]:
     return cleaned or None
 
 
-def parse_timedtext_xml(raw: str) -> Optional[str]:
-    """Parse timedtext XML captions into plain text."""
-    chunks = re.findall(r'<text[^>]*>(.*?)</text>', raw, flags=re.DOTALL)
+def _parse_tagged_captions(raw: str, tag: str) -> Optional[str]:
+    """Extract and clean text wrapped in the given XML/TTML tag."""
+    chunks = re.findall(
+        rf'<{tag}[^>]*>(.*?)</{tag}>',
+        raw,
+        flags=re.DOTALL,
+    )
     if not chunks:
         return None
     cleaned = []
@@ -617,21 +621,16 @@ def parse_timedtext_xml(raw: str) -> Optional[str]:
         if chunk:
             cleaned.append(chunk)
     return ' '.join(cleaned).strip() if cleaned else None
+
+
+def parse_timedtext_xml(raw: str) -> Optional[str]:
+    """Parse timedtext XML captions into plain text."""
+    return _parse_tagged_captions(raw, 'text')
 
 
 def parse_ttml(raw: str) -> Optional[str]:
     """Parse TTML captions into plain text."""
-    chunks = re.findall(r'<p[^>]*>(.*?)</p>', raw, flags=re.DOTALL)
-    if not chunks:
-        return None
-    cleaned = []
-    for chunk in chunks:
-        chunk = html.unescape(chunk)
-        chunk = re.sub(r'<[^>]+>', '', chunk)
-        chunk = chunk.replace('\n', ' ').strip()
-        if chunk:
-            cleaned.append(chunk)
-    return ' '.join(cleaned).strip() if cleaned else None
+    return _parse_tagged_captions(raw, 'p')
 
 
 def download_audio(
