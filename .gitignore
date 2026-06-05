@@ -35,6 +35,8 @@ migrate_working_dir/
 .venv/
 .env
 server/cache/
+# Flutter golden-test failure artifacts.
+test/failures/
 # Generated per-folder validation reports are centralized in docs/confirm/.
 **/confirm.md
 !docs/confirm/**

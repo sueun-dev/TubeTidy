@@ -9,7 +9,7 @@ import re
 import threading
 import time
 import uuid
-from typing import Any, Optional
+from typing import Any, NoReturn, Optional
 
 import requests
 import jwt
@@ -251,7 +251,7 @@ def _require_database_for_write() -> None:
         raise HTTPException(status_code=503, detail='database required')
 
 
-def _raise_db_unavailable(exc: Optional[Exception] = None) -> None:
+def _raise_db_unavailable(exc: Optional[Exception] = None) -> NoReturn:
     status_code = 503 if FAIL_CLOSED_WITHOUT_DB else 500
     detail = (
         'database required'
@@ -570,6 +570,8 @@ def _verify_google_user(token: str) -> str:
 
     subject = _validate_google_token_claims(payload)
     expires_at = payload.get('exp')
+    if expires_at is None:
+        raise HTTPException(status_code=401, detail='token exp invalid')
     try:
         expiry = float(expires_at)
     except (TypeError, ValueError) as exc:
@@ -827,7 +829,7 @@ def transcript(
             payload = _build_transcript_payload(
                 caption_text,
                 source='captions',
-                summarize=req.summarize,
+                summarize=bool(req.summarize),
                 summary_lines=req.summary_lines,
                 max_chars=max_chars,
             )
@@ -871,7 +873,7 @@ def transcript(
         payload = _build_transcript_payload(
             transcript_text,
             source='whisper',
-            summarize=req.summarize,
+            summarize=bool(req.summarize),
             summary_lines=req.summary_lines,
             max_chars=max_chars,
         )

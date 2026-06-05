@@ -40,6 +40,15 @@ class ArchiveToggleResult {
 class ArchiveService {
   static const Duration _timeout = Duration(seconds: 15);
 
+  /// Parse a millisecond epoch value (int or numeric string) into a
+  /// [DateTime], returning null when the value is missing or malformed.
+  static DateTime? _parseEpochMillis(Object? value) {
+    if (value == null) return null;
+    final millis = value is int ? value : int.tryParse(value.toString());
+    if (millis == null) return null;
+    return DateTime.fromMillisecondsSinceEpoch(millis);
+  }
+
   static Future<List<ArchiveEntry>?> fetchArchives(String userId) async {
     if (userId.isEmpty) return null;
     final uri = BackendApi.uri('/archives', queryParameters: {
@@ -57,16 +66,12 @@ class ArchiveService {
       final entries = <ArchiveEntry>[];
       for (final item in items) {
         final videoId = item['video_id'] as String?;
-        final archivedAt = item['archived_at'];
+        final archivedAt = _parseEpochMillis(item['archived_at']);
         if (videoId == null || archivedAt == null) continue;
-        final millis = archivedAt is int
-            ? archivedAt
-            : int.tryParse(archivedAt.toString());
-        if (millis == null) continue;
         entries.add(
           ArchiveEntry(
             videoId: videoId,
-            archivedAt: DateTime.fromMillisecondsSinceEpoch(millis),
+            archivedAt: archivedAt,
             title: item['title'] as String?,
             thumbnailUrl: item['thumbnail_url'] as String?,
             channelId: item['channel_id'] as String?,
@@ -107,16 +112,7 @@ class ArchiveService {
       if (response.statusCode != 200) return null;
       final data = jsonDecode(response.body) as Map<String, dynamic>;
       final archived = data['archived'] == true;
-      final archivedAt = data['archived_at'];
-      DateTime? parsed;
-      if (archivedAt != null) {
-        final millis = archivedAt is int
-            ? archivedAt
-            : int.tryParse(archivedAt.toString());
-        if (millis != null) {
-          parsed = DateTime.fromMillisecondsSinceEpoch(millis);
-        }
-      }
+      final parsed = _parseEpochMillis(data['archived_at']);
       ArchiveEntry? entry;
       final entryVideoId = data['video_id'] as String?;
       if (entryVideoId != null && parsed != null) {
