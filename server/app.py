@@ -188,7 +188,9 @@ async def apply_security_headers(request: Request, call_next):
     """Apply basic security headers and correlation id."""
     response = await call_next(request)
     raw_request_id = request.headers.get('X-Request-Id')
-    if raw_request_id and re.fullmatch(r'[A-Za-z0-9_\-\.]{1,128}', raw_request_id):
+    if raw_request_id and re.fullmatch(
+        r'[A-Za-z0-9_\-\.]{1,128}', raw_request_id
+    ):
         request_id = raw_request_id
     else:
         request_id = str(uuid.uuid4())
@@ -1368,5 +1370,3 @@ def save_selection(
         raise HTTPException(
             status_code=500, detail='selection save failed'
         ) from exc
-
-
